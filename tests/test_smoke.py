@@ -18,6 +18,7 @@ from diaquant.config import DiaQuantConfig
 from diaquant.ptm_profiles import PASS_PROFILES, resolve_passes
 from diaquant.multipass import _config_for_pass
 from diaquant.stats import _bh_fdr
+from diaquant.rt_align import RTAlignParams, align_runs
 
 
 def test_default_modifications_complete():
@@ -113,3 +114,57 @@ def test_bh_fdr_monotonic():
     q = _bh_fdr(pvals)
     assert all(qi >= pi - 1e-9 for qi, pi in zip(q, pvals))
     assert all(q[i] <= q[i+1] + 1e-9 for i in range(len(q)-1))
+
+
+def _make_rt_dataset(n_anchors: int = 200,
+                    drift_sec: float = 25.0,
+                    seed: int = 0) -> pd.DataFrame:
+    """Synthetic two-run dataset for RT alignment tests.
+
+    Run B is shifted by ``drift_sec`` seconds plus mild non-linear curvature
+    plus Gaussian noise (sigma = 3 sec).  Run A is the reference.
+    """
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    rt_ref_min = np.linspace(5.0, 95.0, n_anchors)              # 5..95 minutes
+    drift_min = drift_sec / 60.0
+    curvature = 0.05 * np.sin(rt_ref_min / 15.0)                # +/- 3 sec wave
+    rt_runB_min = rt_ref_min + drift_min + curvature \
+                  + rng.normal(0, 3.0 / 60.0, n_anchors)
+    peptides = [f"PEP{i:04d}" for i in range(n_anchors)]
+    df = pd.DataFrame({
+        "filename": ["runA.mzML"] * n_anchors + ["runB.mzML"] * n_anchors,
+        "Modified.Sequence": peptides + peptides,
+        "Precursor.Charge": [2] * (2 * n_anchors),
+        "RT": list(rt_ref_min) + list(rt_runB_min),
+        "Q.Value": [0.001] * (2 * n_anchors),
+    })
+    return df
+
+
+def test_rt_align_reduces_drift():
+    df = _make_rt_dataset()
+    aligned, stats = align_runs(df, RTAlignParams())
+    runB = stats[stats["filename"] == "runB.mzML"].iloc[0]
+    assert runB["role"] == "aligned"
+    # the LOWESS fit must shrink the residual RMSE substantially
+    assert runB["rmse_sec_after"] < runB["rmse_sec_before"] * 0.5
+    # output must contain the new column with finite values for run B
+    rB = aligned[aligned["filename"] == "runB.mzML"]
+    assert rB["RT.Aligned"].notna().all()
+    assert (rB["RT.Aligned"] != rB["RT"]).any()
+
+
+def test_rt_align_skips_when_few_anchors():
+    df = _make_rt_dataset(n_anchors=10)
+    _, stats = align_runs(df, RTAlignParams(min_anchors=50))
+    runB = stats[stats["filename"] == "runB.mzML"].iloc[0]
+    assert runB["role"].startswith("skipped")
+
+
+def test_rt_align_disabled_returns_unchanged_rt():
+    df = _make_rt_dataset()
+    aligned, stats = align_runs(df, RTAlignParams(enabled=False))
+    # RT.Aligned must equal RT exactly when alignment is off
+    assert (aligned["RT.Aligned"] == aligned["RT"]).all()
+    assert stats.empty

@@ -60,4 +60,11 @@ match_between_runs: true
 scoring_mode: peptidoforms
 machine_learning: nn_cv
 wide_window: false
+
+# ---- LOWESS run-to-run RT alignment (always-on, recommended) ----
+rt_alignment: true
+rt_align_frac: 0.2
+rt_align_min_anchors: 50
+rt_align_q_cutoff: 0.01
+
 threads: 0

@@ -13,7 +13,8 @@ The whole stack is permissively licensed (Apache-2.0 / MIT) and can therefore be
 | 1. mzML parsing & search | [Sage](https://github.com/lazear/sage) v0.14 (Rust) | MIT | Spectrum-centric DIA search with arbitrary variable mods, target-decoy FDR |
 | 2. PTM site localization | `diaquant.ptm_localization` | Apache-2.0 | Softmax over Sage hyperscores → site probability |
 | 3. Quantification | [directLFQ](https://github.com/MannLabs/directlfq) v0.3 | Apache-2.0 | MaxLFQ-equivalent rollup, in O(n) time |
-| 4. Output | `diaquant.writer` | Apache-2.0 | DIA-NN-style `report.pr_matrix.tsv`, `report.pg_matrix.tsv`, plus PTM-site matrix |
+| 4. RT alignment | `diaquant.rt_align` | Apache-2.0 | LOWESS run-to-run retention-time alignment (always-on) |
+| 5. Output | `diaquant.writer` | Apache-2.0 | DIA-NN-style `report.pr_matrix.tsv`, `report.pg_matrix.tsv`, plus PTM-site matrix and RT-alignment statistics |
 
 The optional `[deeplearning]` extra installs **AlphaPeptDeep** (Apache-2.0) to enable on-the-fly RT/MS² prediction and transfer learning for non-canonical PTMs.
 
@@ -131,10 +132,21 @@ All files are written to `output_dir` and are tab-separated, UTF-8.
 | `report.ptm_site_matrix.tsv` | *(none)* | One row per `(gene, residue+position, PTM type)` triple, quantified across all runs with directLFQ. |
 | `report.tsv` | `report.tsv` | Long-format master table with PTM site probabilities, per-pass origin and FDR fields. |
 | `report.pg_matrix.diff.tsv` | *(none)* | Pairwise log2 fold-change, Welch t-test p-value and BH q-value between every group pair defined in the sample sheet (only written when `sample_sheet:` is set). |
+| `report.rt_alignment.tsv` | *(none)* | One row per mzML file with anchor count, drift median/IQR/RMSE in seconds **before and after** LOWESS alignment, and the maximum absolute correction applied. |
 
 In multi-pass mode each pass also writes its own raw Sage outputs to `output_dir/pass_<name>/`, so individual searches can be inspected or re-quantified in isolation.
 
 The first ten columns of `report.pr_matrix.tsv` are: `Protein.Group`, `Protein.Ids`, `Protein.Names`, `Genes`, `First.Protein.Description`, `Proteotypic`, `Stripped.Sequence`, `Modified.Sequence`, `Precursor.Charge`, `Precursor.Id`. The remaining columns are the input mzML file paths, exactly as DIA-NN writes them.
+
+## Run-to-run retention time alignment (LOWESS, always-on)
+
+LC retention times routinely drift between samples — a few seconds is normal, tens of seconds is not unusual after column ageing or temperature changes. Even modest drift causes the same peptide to fall into a different DIA cycle, increasing missing values and degrading site-level quantification. `diaquant` 0.4 therefore aligns every run to a common reference using **LOWESS** (the same approach used by MaxQuant and Skyline), and this is enabled by default.
+
+The alignment runs after the Sage search and before quantification. The run with the largest number of confident PSMs (q ≤ `rt_align_q_cutoff`) is chosen as the reference, then for every other run a LOWESS curve is fitted on the shared anchor peptides (matched by `Modified.Sequence` + `Precursor.Charge`) and applied to all PSMs in that run. The original `RT` column is preserved and a new `RT.Aligned` column is appended to `report.tsv`.
+
+Drift statistics are written to `report.rt_alignment.tsv`, with one row per mzML file and the following columns: `filename`, `role` (`reference`, `aligned`, or `skipped (too few anchors)`), `n_anchors`, `drift_median_sec_before`, `drift_iqr_sec_before`, `rmse_sec_before`, `drift_median_sec_after`, `drift_iqr_sec_after`, `rmse_sec_after`, `max_abs_correction_sec`. Comparing the before/after RMSE columns gives an immediate, quantitative picture of how much drift was corrected — typically a 5–10× reduction on real data. The CLI also prints the median before/after RMSE on the console for a quick sanity check.
+
+All behaviour is controlled by four YAML keys: `rt_alignment` (default `true`; set to `false` to disable), `rt_align_frac` (LOWESS smoothing fraction, default `0.2`), `rt_align_min_anchors` (minimum shared peptides required, default `50`; runs with fewer anchors are reported but not modified) and `rt_align_q_cutoff` (PSM q-value upper bound for anchor selection, default `0.01`).
 
 ## Universal PTM support
 
@@ -168,7 +180,7 @@ When the sample sheet is referenced from the YAML (`sample_sheet: configs/sample
 
 ## Roadmap
 
-The next minor version will replace the softmax-based site localization with an AlphaPeptDeep-rescored Δ-score and add an on-the-fly transfer-learning step that fine-tunes RT/MS² predictions per experiment, matching the AlphaDIA paradigm while remaining fully Apache-2.0.
+The next minor version will replace the softmax-based site localization with an AlphaPeptDeep-rescored Δ-score and add an on-the-fly transfer-learning step that fine-tunes RT/MS² predictions per experiment, matching the AlphaDIA paradigm while remaining fully Apache-2.0. AlphaPeptDeep predictions will additionally be used as a *third* anchor source for RT alignment, allowing accurate alignment even for runs whose shared-PSM count falls below `rt_align_min_anchors`.
 
 ## Licence
 

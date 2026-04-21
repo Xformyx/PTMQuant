@@ -28,6 +28,7 @@ from .multipass import run_multipass
 from .parse_sage import attach_fasta_meta, parse_sage_tsv
 from .ptm_profiles import PASS_PROFILES, list_builtin_passes
 from .quantify import precursor_matrix, protein_quant, site_quant
+from .rt_align import RTAlignParams, align_runs, write_rt_stats
 from .sage_runner import run_sage
 from .stats import differential, load_sample_sheet
 from .writer import (
@@ -85,6 +86,10 @@ def init_config(out: str, fasta: str, mzml_dir: str,
         "match_between_runs": True,
         "scoring_mode": "peptidoforms",
         "machine_learning": "nn_cv",
+        "rt_alignment": True,
+        "rt_align_frac": 0.2,
+        "rt_align_min_anchors": 50,
+        "rt_align_q_cutoff": 0.01,
         "threads": 0,
     }
     if passes:
@@ -140,6 +145,33 @@ def run(cfg_path: str) -> None:
             sage_tsv, site_cutoff=cfg.site_probability_cutoff,
         )
         long_df = attach_fasta_meta(long_df, cfg.fasta)
+
+    # ----- LOWESS run-to-run RT alignment (always-on) -----
+    if cfg.rt_alignment:
+        click.echo(f"[diaquant] RT alignment (LOWESS frac={cfg.rt_align_frac})")
+        long_df, rt_stats = align_runs(
+            long_df,
+            params=RTAlignParams(
+                enabled=True,
+                frac=cfg.rt_align_frac,
+                min_anchors=cfg.rt_align_min_anchors,
+                q_cutoff=cfg.rt_align_q_cutoff,
+            ),
+        )
+        rt_stats_path = cfg.output_dir / "report.rt_alignment.tsv"
+        write_rt_stats(rt_stats, rt_stats_path)
+        click.echo(f"  wrote {rt_stats_path}")
+        # short summary on the console
+        if not rt_stats.empty:
+            aligned = rt_stats[rt_stats["role"] == "aligned"]
+            if not aligned.empty:
+                click.echo(
+                    "  RMSE drift (sec):  before median = "
+                    f"{aligned['rmse_sec_before'].median():.2f}, "
+                    f"after median = {aligned['rmse_sec_after'].median():.2f}"
+                )
+    else:
+        click.echo("[diaquant] RT alignment disabled (rt_alignment: false)")
 
     pr_wide = precursor_matrix(long_df)
     pg_lfq = protein_quant(long_df, min_samples=cfg.quant_min_samples)

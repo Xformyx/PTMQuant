@@ -77,6 +77,12 @@ class DiaQuantConfig:
     # ---- DIA acquisition ----
     wide_window: bool = False               # True for SWATH / wide-window DIA (>10 m/z)
 
+    # ---- run-to-run RT alignment (LOWESS) ----
+    rt_alignment: bool = True               # always-on by default per user request
+    rt_align_frac: float = 0.2              # LOWESS smoothing fraction
+    rt_align_min_anchors: int = 50          # min common PSMs to align a run
+    rt_align_q_cutoff: float = 0.01         # PSM q-value upper bound for anchors
+
     # ---- runtime ----
     threads: int = 0                        # 0 = autodetect
     sage_binary: str = "sage"

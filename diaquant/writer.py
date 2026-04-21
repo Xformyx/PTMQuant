@@ -103,7 +103,7 @@ def write_main_report(precursor_long: pd.DataFrame, out: Path) -> Path:
         "Modified.Sequence", "Precursor.Charge", "Precursor.Id",
         "PTM.Site.Positions", "PTM.Modification",
         "Best.Site.Probability", "PTM.Site.Confident",
-        "Q.Value", "Protein.Q.Value", "Intensity", "RT", "Predicted.RT",
+        "Q.Value", "Protein.Q.Value", "Intensity", "RT", "RT.Aligned", "Predicted.RT",
     ] if c in precursor_long.columns]
     precursor_long[keep].rename(columns={"filename": "File.Name"}) \
                        .to_csv(out, sep="\t", index=False, na_rep="")

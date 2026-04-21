@@ -37,6 +37,10 @@ results/
 sage_config.json
 matched_fragments.sage.parquet
 
+# Docker image exports (docker save)
+ptmquant*.tar
+ptmquant*.tar.gz
+
 # Large data
 *.mzML
 *.mzML.gz

@@ -26,6 +26,7 @@ dependencies = [
 deeplearning = ["alphapeptdeep>=1.4"]
 
 [project.scripts]
+ptmquant = "diaquant.cli:cli"
 diaquant = "diaquant.cli:cli"
 
 [tool.setuptools.packages.find]

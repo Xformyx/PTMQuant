@@ -1,0 +1,63 @@
+# diaquant 0.3 multi-pass whole-proteome preset
+#
+# This preset is designed for a typical KIST-style narrow-window DIA
+# experiment on a Thermo Orbitrap Exploris 240 (6 m/z windows, ~5 s
+# cycle).  Samples are *not* PTM-enriched; the user wants protein
+# expression and selected PTM sites quantified from the same mzML
+# files.  Add or remove items under ``passes:`` to control which PTMs
+# are searched.
+
+fasta: /path/to/uniprot_mouse.fasta
+mzml_files:
+  - /path/to/mzml/sample_01.mzML
+  - /path/to/mzml/sample_02.mzML
+  # ... 36 mzML files total
+output_dir: diaquant_results
+
+# ---- Multi-pass selection ----
+# Each pass runs an independent Sage search with PTM-tuned parameters.
+# Comment out any line to skip that pass.
+passes:
+  - whole_proteome    # always recommended (protein expression backbone)
+  - phospho           # STY phospho sites
+  - acetyl_methyl     # K-acetyl + K/R mono/di/tri-methyl
+  # - ubiquitin       # K-GG (rare without enrichment)
+  # - succinyl_acyl   # K-Succinyl/Malonyl/Crotonyl
+
+# Custom passes can be added if a built-in profile is not enough:
+custom_passes: []
+# - name: lactyl
+#   variable_modifications: [Oxidation, Acetyl_Nterm]
+#   custom_modifications:
+#     - {name: Lactyl, unimod_id: 2114, mass_shift: 72.021129, targets: [K]}
+#   missed_cleavages: 3
+#   max_variable_mods: 2
+
+# ---- Optional sample sheet for automatic differential analysis ----
+# sample_sheet: configs/sample_sheet_KIST_EPS.tsv
+
+# ---- Global Sage parameters (overridden per-pass when needed) ----
+fixed_modifications: [Carbamidomethyl]
+variable_modifications: []   # ignored when ``passes:`` is non-empty
+custom_modifications: []
+max_variable_mods: 2
+missed_cleavages: 2
+min_peptide_length: 7
+max_peptide_length: 30
+min_precursor_charge: 2
+max_precursor_charge: 4
+min_precursor_mz: 400.0
+max_precursor_mz: 1000.0
+min_fragment_mz: 200.0
+max_fragment_mz: 1500.0
+precursor_tol_ppm: 6.0       # Exploris 240 high-res default
+fragment_tol_ppm: 12.0
+psm_fdr: 0.01
+peptide_fdr: 0.01
+protein_fdr: 0.01
+site_probability_cutoff: 0.75
+match_between_runs: true
+scoring_mode: peptidoforms
+machine_learning: nn_cv
+wide_window: false
+threads: 0

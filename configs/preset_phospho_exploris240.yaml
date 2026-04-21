@@ -1,0 +1,61 @@
+# diaquant preset -- Phosphoproteomics on Thermo Orbitrap Exploris 240
+#
+# Mirrors the user's DIA-NN parameters (phosphoidentificationoption.txt +
+# phosphorylationLibrarygeneration.txt) but with the corrections discussed in
+# the parameter review (precursor m/z lower bound 400, length 7-30 unified,
+# max charge 5 unified).
+
+fasta: /home/ubuntu/upload/uniprotkb_organism_name_Mus_musculus_AN_2025_07_24(1).fasta
+mzml_files:
+  - /home/ubuntu/upload/EPS_NonECM_0h_2.mzML
+
+output_dir: /home/ubuntu/diaquant_results/phospho
+
+# enzyme & digestion
+enzyme: trypsin
+missed_cleavages: 2          # DIA-NN identification value
+min_peptide_length: 7
+max_peptide_length: 30
+
+# precursor / fragment ranges (Exploris 240, 6 m/z DIA actually starts at ~403 m/z)
+min_precursor_charge: 2
+max_precursor_charge: 4
+min_precursor_mz: 400        # was 350 in DIA-NN; raised to match isolation start
+max_precursor_mz: 1000       # 6 m/z windows do not extend past ~1000 m/z
+min_fragment_mz: 200
+max_fragment_mz: 1500
+
+# tolerances (identification = strict, library = looser)
+precursor_tol_ppm: 6
+fragment_tol_ppm: 12
+library_precursor_tol_ppm: 8
+library_fragment_tol_ppm: 15
+
+# modifications
+fixed_modifications:
+  - Carbamidomethyl
+variable_modifications:
+  - Oxidation
+  - Phospho                  # STY phosphorylation (UniMod:21)
+custom_modifications: []
+max_variable_mods: 2         # DIA-NN value (3 if you want library-style search)
+
+# FDR + site localization + scoring
+psm_fdr: 0.01
+peptide_fdr: 0.01
+protein_fdr: 0.01
+site_probability_cutoff: 0.75
+scoring_mode: peptidoforms   # essential for PTM site discrimination
+
+# quantification
+quant_top_n_fragments: 6
+quant_min_samples: 2
+match_between_runs: true     # DIA-NN MBR
+machine_learning: nn_cv
+
+# DIA acquisition
+wide_window: false           # 6 m/z windows -> narrow
+
+# runtime
+threads: 0
+sage_binary: sage

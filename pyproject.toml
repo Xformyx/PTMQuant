@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "diaquant"
+version = "0.1.0"
+description = "Open-source DIA proteomics quantification pipeline with universal PTM support (Sage + directLFQ + AlphaPeptDeep)"
+authors = [{name = "Manus AI"}]
+license = {text = "Apache-2.0"}
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyteomics>=4.6",
+    "lxml>=4.9",
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "click>=8.1",
+    "pyyaml>=6.0",
+    "tqdm>=4.65",
+    "directlfq>=0.3.0",
+]
+
+[project.optional-dependencies]
+deeplearning = ["alphapeptdeep>=1.4"]
+
+[project.scripts]
+diaquant = "diaquant.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["diaquant*"]

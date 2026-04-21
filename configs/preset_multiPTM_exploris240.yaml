@@ -1,0 +1,72 @@
+# diaquant preset -- Multi-PTM (Phospho + Acetyl + Methyl + GlyGly + Succinyl)
+#                     on Thermo Orbitrap Exploris 240
+#
+# This preset is the central reason for switching from DIA-NN: methylation,
+# acetylation and other K-acylations are searched in a single run with
+# directLFQ site-level quantification.  Note: enabling many variable mods
+# expands the search space significantly; we therefore keep
+# max_variable_mods=3 to stay tractable.
+
+fasta: /home/ubuntu/upload/uniprotkb_organism_name_Mus_musculus_AN_2025_07_24(1).fasta
+mzml_files:
+  - /home/ubuntu/upload/EPS_NonECM_0h_2.mzML
+
+output_dir: /home/ubuntu/diaquant_results/multiptm
+
+enzyme: trypsin
+missed_cleavages: 3          # higher value because acetyl/methyl-K is missed by trypsin
+min_peptide_length: 7
+max_peptide_length: 30
+
+min_precursor_charge: 2
+max_precursor_charge: 5
+min_precursor_mz: 400
+max_precursor_mz: 1000
+min_fragment_mz: 200
+max_fragment_mz: 1500
+
+precursor_tol_ppm: 6
+fragment_tol_ppm: 12
+library_precursor_tol_ppm: 8
+library_fragment_tol_ppm: 15
+
+fixed_modifications:
+  - Carbamidomethyl
+
+variable_modifications:
+  - Oxidation
+  - Acetyl_Nterm
+  - Phospho        # STY phosphorylation
+  - Acetyl         # K-acetylation
+  - Methyl         # mono-methyl K/R
+  - Dimethyl       # di-methyl K/R
+  - Trimethyl      # tri-methyl K
+  - GlyGly         # ubiquitin remnant on K
+  - Succinyl       # K succinylation
+
+custom_modifications: []
+# Example: add a custom PTM not in the default catalogue
+# custom_modifications:
+#   - name: Lactyl
+#     unimod_id: 2114
+#     mass_shift: 72.021129
+#     targets: [K]
+#     fixed: false
+
+max_variable_mods: 3
+
+psm_fdr: 0.01
+peptide_fdr: 0.01
+protein_fdr: 0.01
+site_probability_cutoff: 0.75
+scoring_mode: peptidoforms
+
+quant_top_n_fragments: 6
+quant_min_samples: 2
+match_between_runs: true
+machine_learning: nn_cv
+
+wide_window: false
+
+threads: 0
+sage_binary: sage

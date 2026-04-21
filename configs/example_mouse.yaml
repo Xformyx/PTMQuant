@@ -1,0 +1,62 @@
+# diaquant example configuration -- mouse proteome, multi-PTM
+#
+# Replace `mzml_files:` with the paths of your converted mzML files.
+
+fasta: /home/ubuntu/upload/uniprotkb_organism_name_Mus_musculus_AN_2025_07_24(1).fasta
+mzml_files:
+  - /path/to/sample_01.mzML
+  - /path/to/sample_02.mzML
+
+output_dir: /home/ubuntu/diaquant_results
+
+# enzyme & digestion
+enzyme: trypsin
+missed_cleavages: 2
+min_peptide_length: 7
+max_peptide_length: 35
+
+# tolerances (Orbitrap / Astral defaults)
+precursor_tol_ppm: 20
+fragment_tol_ppm: 20
+
+# modifications -- these are the names defined in diaquant.modifications
+# Add or remove freely; methylation/acetylation/succinylation etc. are all
+# supported out of the box.  Custom PTMs go under custom_modifications.
+fixed_modifications:
+  - Carbamidomethyl
+
+variable_modifications:
+  - Oxidation
+  - Acetyl_Nterm
+  - Phospho        # STY phosphorylation
+  - Acetyl         # K-acetylation
+  - Methyl         # mono-methyl K/R
+  - Dimethyl       # di-methyl K/R
+  - Trimethyl      # tri-methyl K
+  - GlyGly         # ubiquitin remnant on K
+  - Succinyl       # K succinylation
+
+custom_modifications: []
+# example of a user-defined PTM not in the default catalogue:
+# custom_modifications:
+#   - name: Lactyl
+#     unimod_id: 2114
+#     mass_shift: 72.021129
+#     targets: [K]
+#     fixed: false
+
+max_variable_mods: 3
+
+# FDR + site probability
+psm_fdr: 0.01
+peptide_fdr: 0.01
+protein_fdr: 0.01
+site_probability_cutoff: 0.75
+
+# quantification
+quant_top_n_fragments: 6
+quant_min_samples: 2
+
+# runtime
+threads: 0
+sage_binary: sage

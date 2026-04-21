@@ -1,0 +1,60 @@
+# diaquant preset -- Ubiquitylation (K-GG) on Thermo Orbitrap Exploris 240
+#
+# Mirrors the user's DIA-NN parameters (ubiquitylationidentificationoption.txt
+# + ubiqutirylationLibrarygeneration.txt).  Differences from the user file:
+# - precursor m/z lower bound raised from 350 to 400 (matches isolation start)
+# - peptide length unified at 7-25 (= ID range; library was 7-30)
+# - max charge unified at 4 (= ID range; library was 5)
+
+fasta: /home/ubuntu/upload/uniprotkb_organism_name_Mus_musculus_AN_2025_07_24(1).fasta
+mzml_files:
+  - /home/ubuntu/upload/EPS_NonECM_0h_2.mzML
+
+output_dir: /home/ubuntu/diaquant_results/ubiquitin
+
+# enzyme & digestion -- K-GG enrichment usually requires more missed cleavages
+# because GG-modified K is no longer cleaved by trypsin
+enzyme: trypsin
+missed_cleavages: 3          # DIA-NN value for ubiquitin workflow
+min_peptide_length: 7
+max_peptide_length: 25
+
+# precursor / fragment ranges
+min_precursor_charge: 2
+max_precursor_charge: 4
+min_precursor_mz: 400
+max_precursor_mz: 1000
+min_fragment_mz: 250
+max_fragment_mz: 1500
+
+# tolerances
+precursor_tol_ppm: 6
+fragment_tol_ppm: 12
+library_precursor_tol_ppm: 8
+library_fragment_tol_ppm: 15
+
+# modifications -- DIA-NN identification has Ox(M) OFF; library has it ON
+fixed_modifications:
+  - Carbamidomethyl
+variable_modifications:
+  - GlyGly                   # K-GG (UniMod:121) ubiquitin remnant
+custom_modifications: []
+max_variable_mods: 2
+
+# FDR + site localization + scoring
+psm_fdr: 0.01
+peptide_fdr: 0.01
+protein_fdr: 0.01
+site_probability_cutoff: 0.75
+scoring_mode: peptidoforms
+
+# quantification
+quant_top_n_fragments: 6
+quant_min_samples: 2
+match_between_runs: true
+machine_learning: nn_cv
+
+wide_window: false
+
+threads: 0
+sage_binary: sage

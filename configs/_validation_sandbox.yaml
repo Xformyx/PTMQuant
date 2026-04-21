@@ -1,0 +1,44 @@
+# INTERNAL sandbox-only smoke run with the small 1000-protein FASTA
+fasta: /tmp/mouse_1k.fasta
+mzml_files:
+  - /home/ubuntu/upload/EPS_NonECM_0h_2.mzML
+output_dir: /home/ubuntu/diaquant_results/sandbox
+
+enzyme: trypsin
+missed_cleavages: 1
+min_peptide_length: 7
+max_peptide_length: 30
+
+min_precursor_charge: 2
+max_precursor_charge: 4
+min_precursor_mz: 400
+max_precursor_mz: 1000
+min_fragment_mz: 200
+max_fragment_mz: 1500
+
+precursor_tol_ppm: 6
+fragment_tol_ppm: 12
+
+fixed_modifications:
+  - Carbamidomethyl
+variable_modifications:
+  - Oxidation
+  - Phospho
+custom_modifications: []
+max_variable_mods: 2
+
+psm_fdr: 0.01
+peptide_fdr: 0.01
+protein_fdr: 0.01
+site_probability_cutoff: 0.75
+scoring_mode: peptidoforms
+
+quant_top_n_fragments: 6
+quant_min_samples: 1
+match_between_runs: false
+machine_learning: nn_cv
+
+wide_window: false
+
+threads: 0
+sage_binary: sage

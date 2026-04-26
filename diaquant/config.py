@@ -81,7 +81,15 @@ class DiaQuantConfig:
     rt_alignment: bool = True               # always-on by default per user request
     rt_align_frac: float = 0.2              # LOWESS smoothing fraction
     rt_align_min_anchors: int = 50          # min common PSMs to align a run
-    rt_align_q_cutoff: float = 0.01         # PSM q-value upper bound for anchors
+    rt_align_q_cutoff: float = 0.01         # PSM q-value upper bound for anchors (ref + per-run)
+
+    # ---- RT prediction filter ----
+    # After Sage search, Sage predicts an expected RT for every PSM
+    # (predict_rt: true).  PSMs whose |observed_RT - predicted_RT| exceeds
+    # this threshold (in minutes) are discarded as likely false positives.
+    # Set to None (or omit from YAML) to disable.
+    # Typical value: 5.0 min for a 90-min LC gradient.
+    rt_prediction_tolerance_min: Optional[float] = 5.0
 
     # ---- runtime ----
     threads: int = 0                        # 0 = autodetect

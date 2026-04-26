@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import List
 
 import click
+import pandas as pd
 import yaml
 
 from . import __version__
@@ -32,6 +33,8 @@ from .rt_align import RTAlignParams, align_runs, write_rt_stats
 from .sage_runner import run_sage
 from .stats import differential, load_sample_sheet
 from .writer import (
+    PG_COLS,
+    PR_COLS,
     write_main_report,
     write_pg_matrix,
     write_pr_matrix,
@@ -142,9 +145,60 @@ def run(cfg_path: str) -> None:
         click.echo(f"  mode  : single-pass (vars={cfg.variable_modifications})")
         sage_tsv = run_sage(cfg)
         long_df = parse_sage_tsv(
-            sage_tsv, site_cutoff=cfg.site_probability_cutoff,
+            sage_tsv,
+            site_cutoff=cfg.site_probability_cutoff,
+            peptide_fdr=cfg.peptide_fdr,
         )
         long_df = attach_fasta_meta(long_df, cfg.fasta)
+
+    if long_df.empty:
+        # Sage found PSMs but all were removed by FDR / other filters.
+        # Print a diagnostic summary of what Sage actually found.
+        n_files = len(cfg.mzml_files)
+        lfq_enabled = n_files >= 2
+        click.secho(
+            "[diaquant] No target PSMs passed filters (empty result).\n"
+            f"  Files searched       : {n_files}\n"
+            f"  Sage LFQ mode        : {'enabled (lfq=true)' if lfq_enabled else 'disabled (lfq=false, single file)'}\n"
+            f"  Peptide FDR cutoff   : {cfg.peptide_fdr}\n"
+            "  Hints:\n"
+            "    • Check that ≥2 mzML files are listed when lfq is needed.\n"
+            "    • Relax peptide_fdr (e.g. 0.10) and check Sage's results.sage.tsv.\n"
+            "    • Confirm mzML is DIA (not DDA) and FASTA matches the species.",
+            fg="yellow",
+        )
+        out = cfg.output_dir
+        sample_names = [Path(p).name for p in cfg.mzml_files]
+        write_pr_matrix(
+            pd.DataFrame(columns=PR_COLS + sample_names),
+            out / "report.pr_matrix.tsv",
+        )
+        pd.DataFrame(columns=PG_COLS + sample_names).to_csv(
+            out / "report.pg_matrix.tsv", sep="\t", index=False, na_rep=""
+        )
+        write_site_matrix(pd.DataFrame(), out / "report.ptm_site_matrix.tsv")
+        write_main_report(long_df, out / "report.tsv")
+        click.secho("[diaquant] done (no identifications).", fg="yellow")
+        return
+
+    # ----- RT prediction error filter -----
+    # Remove PSMs whose observed RT deviates too far from Sage's predicted RT.
+    # This is a lightweight false-positive filter that does not require
+    # re-scoring; Sage generates predicted_rt (→ Predicted.RT) when
+    # predict_rt=true.  The tolerance is in minutes; None disables the filter.
+    if (
+        cfg.rt_prediction_tolerance_min is not None
+        and "Predicted.RT" in long_df.columns
+        and not long_df.empty
+    ):
+        rt_err = (long_df["RT"] - long_df["Predicted.RT"]).abs()
+        before = len(long_df)
+        long_df = long_df[rt_err <= cfg.rt_prediction_tolerance_min]
+        click.echo(
+            f"[diaquant] RT prediction filter "
+            f"(|RT - Predicted.RT| ≤ {cfg.rt_prediction_tolerance_min:.1f} min): "
+            f"{before} → {len(long_df)} PSMs"
+        )
 
     # ----- LOWESS run-to-run RT alignment (always-on) -----
     if cfg.rt_alignment:
@@ -172,6 +226,27 @@ def run(cfg_path: str) -> None:
                 )
     else:
         click.echo("[diaquant] RT alignment disabled (rt_alignment: false)")
+
+    if long_df.empty:
+        # RT filter or RT alignment may have emptied the frame; report it.
+        click.secho(
+            "[diaquant] PSMs were found but removed by RT filter / alignment. "
+            "Try relaxing rt_prediction_tolerance_min.",
+            fg="yellow",
+        )
+        out = cfg.output_dir
+        sample_names = [Path(p).name for p in cfg.mzml_files]
+        write_pr_matrix(
+            pd.DataFrame(columns=PR_COLS + sample_names),
+            out / "report.pr_matrix.tsv",
+        )
+        pd.DataFrame(columns=PG_COLS + sample_names).to_csv(
+            out / "report.pg_matrix.tsv", sep="\t", index=False, na_rep=""
+        )
+        write_site_matrix(pd.DataFrame(), out / "report.ptm_site_matrix.tsv")
+        write_main_report(long_df, out / "report.tsv")
+        click.secho("[diaquant] done (no identifications).", fg="yellow")
+        return
 
     pr_wide = precursor_matrix(long_df)
     pg_lfq = protein_quant(long_df, min_samples=cfg.quant_min_samples)

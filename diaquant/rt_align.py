@@ -131,6 +131,9 @@ def align_runs(precursor_long: pd.DataFrame,
     df["_pkey"] = _peptide_key(df)
 
     ref_df = df[df["filename"] == ref_run]
+    # filter anchors to high-quality PSMs so the LOWESS fit is reliable
+    if "Q.Value" in ref_df.columns:
+        ref_df = ref_df[ref_df["Q.Value"] <= params.q_cutoff]
     # use median RT in case the reference has multiple PSMs per peptide
     ref_rt = (ref_df.groupby("_pkey")["RT"].median()
                     .rename("rt_ref"))
@@ -144,7 +147,10 @@ def align_runs(precursor_long: pd.DataFrame,
                                   max_corr=0.0))
             continue
 
-        run_med = sub.groupby("_pkey")["RT"].median()
+        # restrict non-reference anchors to confident PSMs as well
+        sub_conf = sub[sub["Q.Value"] <= params.q_cutoff] \
+            if "Q.Value" in sub.columns else sub
+        run_med = sub_conf.groupby("_pkey")["RT"].median()
         common = ref_rt.index.intersection(run_med.index)
         if len(common) < params.min_anchors:
             # not enough anchors — leave RT unchanged

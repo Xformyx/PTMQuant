@@ -95,7 +95,8 @@ def run_multipass(base: DiaQuantConfig) -> Tuple[pd.DataFrame, Dict[str, pd.Data
         pass_cfg = _config_for_pass(base, profile)
         sage_tsv = run_sage(pass_cfg)
         df = parse_sage_tsv(sage_tsv,
-                            site_cutoff=pass_cfg.site_probability_cutoff)
+                            site_cutoff=pass_cfg.site_probability_cutoff,
+                            peptide_fdr=pass_cfg.peptide_fdr)
         df = attach_fasta_meta(df, pass_cfg.fasta)
         df = _annotate_pass(df, profile)
         per_pass[profile.name] = df

@@ -105,16 +105,26 @@ def build_sage_config(cfg: DiaQuantConfig) -> dict:
             "generate_decoys": True,
             "fasta": str(cfg.fasta),
         },
+        # DIA scoring strategy:
+        # - lfq=false: use DDA-style scoring to avoid the MS1-feature-tracing
+        #   bootstrap failure that silently empties results.sage.tsv with 1-2 files.
+        # - wide_window=true: recommended Sage mode for DIA; relaxes precursor m/z
+        #   filtering and primarily scores via fragment ion matching (better for
+        #   chimeric spectra in narrow/medium-window DIA).
+        "quant": {
+            "lfq": False,
+        },
         "precursor_tol":  {"ppm": [-cfg.precursor_tol_ppm, cfg.precursor_tol_ppm]},
         "fragment_tol":   {"ppm": [-cfg.fragment_tol_ppm,  cfg.fragment_tol_ppm]},
         "precursor_charge": [cfg.min_precursor_charge, cfg.max_precursor_charge],
         "isotope_errors": list(cfg.isotope_errors),
         "deisotope": True,
-        "chimera": True,                       # essential for DIA chimeric spectra
-        "wide_window": bool(cfg.wide_window),  # narrow window DIA (≤10 m/z) -> False
+        "chimera": True,
+        "wide_window": True,               # DIA mode: score via fragments, relax precursor m/z
         "predict_rt": True,
         "min_peaks": 15,
         "max_peaks": 150,
+        "min_matched_peaks": 3,            # permissive for chimeric DIA spectra
         "report_psms": 1,
         "max_fragment_charge": 2,
         "output_directory": str(cfg.output_dir / "sage"),

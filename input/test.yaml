@@ -1,0 +1,66 @@
+# Docker — 프로젝트 루트(PTMQuant)에서:
+#
+#   mkdir -p output
+#   docker run --rm \
+#     -v "$PWD/input:/input" \
+#     -v "$PWD/reference:/reference" \
+#     -v "$PWD/output:/output" \
+#     ptmquant run --config /input/test.yaml
+#
+
+fasta: /reference/uniprotkb_organism_name_Mus_musculus_AN_2025_07_24.fasta
+mzml_files:
+  - /input/2025-46847_KBSI_3h_1.mzML
+  - /input/2025-46847_KBSI_3h_2.mzML
+  - /input/2025-46847_KBSI_3h_3.mzML
+  - /input/2025-46847_KBSI_6h_1.mzML
+  - /input/2025-46847_KBSI_6h_2.mzML
+  - /input/2025-46847_KBSI_6h_3.mzML
+  - /input/2025-46847_KBSI_24h_1.mzML
+  - /input/2025-46847_KBSI_24h_2.mzML
+  - /input/2025-46847_KBSI_24h_3.mzML
+  - /input/2025-46847_KBSI_control_1.mzML
+  - /input/2025-46847_KBSI_control_2.mzML
+  - /input/2025-46847_KBSI_control_3.mzML
+
+output_dir: /output
+
+sage_binary: sage
+threads: 0
+
+enzyme: trypsin
+missed_cleavages: 2
+min_peptide_length: 7
+max_peptide_length: 30
+
+min_precursor_charge: 2
+max_precursor_charge: 4
+min_precursor_mz: 400.0
+max_precursor_mz: 1000.0
+min_fragment_mz: 200.0
+max_fragment_mz: 1500.0
+
+precursor_tol_ppm: 6.0
+fragment_tol_ppm: 12.0
+library_precursor_tol_ppm: 8.0
+library_fragment_tol_ppm: 15.0
+
+fixed_modifications:
+  - Carbamidomethyl
+variable_modifications:
+  - Oxidation
+custom_modifications: []
+max_variable_mods: 2
+
+psm_fdr: 0.10
+peptide_fdr: 0.10
+protein_fdr: 0.10
+site_probability_cutoff: 0.75
+scoring_mode: peptidoforms
+
+quant_top_n_fragments: 6
+quant_min_samples: 1
+match_between_runs: true
+machine_learning: nn_cv
+
+wide_window: false

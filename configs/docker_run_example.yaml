@@ -1,0 +1,70 @@
+# Example config for running the ptmquant image with bind mounts.
+#
+# Windows (PowerShell), host folders you map into the container:
+#   C:\ptmdata\raw  ->  /input
+#   C:\ptmdata\out  ->  /output
+# Place this file in C:\ptmdata\raw\ and run, for example:
+#   docker run --rm -v C:\ptmdata\raw:/input -v C:\ptmdata\out:/output ptmquant run --config /input/docker_run_example.yaml
+#
+# Before running: put a real FASTA at /input/... and list every mzML under /input/...
+#   (or copy this YAML next to your data and fix the paths / filenames below).
+
+# --- required paths (inside the container) ---
+fasta: /input/reference.fasta
+mzml_files:
+  - /input/mzml/A.mzML
+  - /input/mzml/B.mzML
+output_dir: /output
+
+# --- search engine (bundled in the Docker image) ---
+sage_binary: sage
+threads: 0
+
+# --- digestion ---
+enzyme: trypsin
+missed_cleavages: 2
+min_peptide_length: 7
+max_peptide_length: 30
+
+# --- precursor / fragment ranges (narrow-window DIA, Exploris-class) ---
+min_precursor_charge: 2
+max_precursor_charge: 4
+min_precursor_mz: 400.0
+max_precursor_mz: 1000.0
+min_fragment_mz: 200.0
+max_fragment_mz: 1500.0
+
+# --- tolerances (ppm) ---
+precursor_tol_ppm: 6.0
+fragment_tol_ppm: 12.0
+library_precursor_tol_ppm: 8.0
+library_fragment_tol_ppm: 15.0
+
+# --- single-pass PTM example: phosphorylation (edit for your experiment) ---
+fixed_modifications:
+  - Carbamidomethyl
+variable_modifications:
+  - Oxidation
+  - Acetyl_Nterm
+  - Phospho
+custom_modifications: []
+max_variable_mods: 2
+
+# --- FDR & localization ---
+psm_fdr: 0.01
+peptide_fdr: 0.01
+protein_fdr: 0.01
+site_probability_cutoff: 0.75
+scoring_mode: peptidoforms
+
+# --- quantification ---
+quant_top_n_fragments: 6
+quant_min_samples: 2
+match_between_runs: true
+machine_learning: nn_cv
+
+# --- acquisition ---
+wide_window: false
+
+# --- optional: differential analysis (path must exist inside the container) ---
+# sample_sheet: /input/sample_sheet.tsv

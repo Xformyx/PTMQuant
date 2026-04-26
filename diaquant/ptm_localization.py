@@ -55,6 +55,18 @@ def extract_mod_positions(mod_seq: str) -> List[Tuple[int, str]]:
     return positions
 
 
+def _sage_score_column(psm: pd.DataFrame) -> str:
+    """Raw Sage TSV uses ``hyperscore``; after ``parse_sage`` rename it is ``Score``."""
+    if "hyperscore" in psm.columns:
+        return "hyperscore"
+    if "Score" in psm.columns:
+        return "Score"
+    raise KeyError(
+        "Expected Sage match score column 'hyperscore' or 'Score'; "
+        f"have: {list(psm.columns)}"
+    )
+
+
 def add_site_probabilities(psm: pd.DataFrame,
                            cutoff: float = 0.75) -> pd.DataFrame:
     """Add Best.Site.Probability and PTM.Site.Confident columns to a Sage PSM table.
@@ -63,12 +75,23 @@ def add_site_probabilities(psm: pd.DataFrame,
 
     * ``peptide``        – modified sequence in Sage syntax
     * ``proteins``       – semicolon-separated UniProt accessions
-    * ``hyperscore``     – Sage match score (higher is better)
+    * ``hyperscore``     – Sage match score (higher is better); renamed to ``Score`` in diaquant
     * ``filename``       – mzML file that produced the PSM
     * ``charge``         – precursor charge
     """
     if "peptide" not in psm.columns:
         raise KeyError("Expected Sage column 'peptide' in input table.")
+
+    if psm.empty:
+        return psm.assign(
+            **{
+                "Best.Site.Probability": np.nan,
+                "PTM.Site.Confident": False,
+                "PTM.Site.Positions": "",
+            }
+        )
+
+    score_col = _sage_score_column(psm)
 
     # bare sequence (modifications stripped) used to group peptidoforms
     bare = psm["peptide"].str.replace(MOD_RE, "", regex=True)
@@ -77,7 +100,7 @@ def add_site_probabilities(psm: pd.DataFrame,
 
     # group by file × bare-seq × charge → softmax over hyperscores
     grp = psm.groupby(["filename", "_bare", "charge"])
-    psm["Best.Site.Probability"] = grp["hyperscore"].transform(
+    psm["Best.Site.Probability"] = grp[score_col].transform(
         lambda s: np.exp(s - s.max()) / np.exp(s - s.max()).sum()
     )
     psm["PTM.Site.Confident"] = psm["Best.Site.Probability"] >= cutoff

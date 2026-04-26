@@ -59,6 +59,26 @@ def test_add_site_probabilities_softmax():
     assert best["PTM.Site.Confident"]
 
 
+def test_add_site_probabilities_uses_score_after_diann_rename():
+    """parse_sage renames Sage ``hyperscore`` → ``Score``; localization must still work."""
+    psm = pd.DataFrame({
+        "filename": ["a.mzML", "a.mzML"],
+        "peptide": ["AAS[+79.966331]TR", "AAST[+79.966331]R"],
+        "charge": [2, 2],
+        "Score": [30.0, 25.0],
+    })
+    out = add_site_probabilities(psm, cutoff=0.5)
+    assert out["Best.Site.Probability"].max() > 0.99
+
+
+def test_add_site_probabilities_empty():
+    psm = pd.DataFrame({"peptide": pd.Series([], dtype=object)})
+    out = add_site_probabilities(psm, cutoff=0.75)
+    assert out.empty
+    assert "Best.Site.Probability" in out.columns
+    assert "PTM.Site.Confident" in out.columns
+
+
 def test_build_sage_config_minimal(tmp_path: Path):
     cfg = DiaQuantConfig(
         fasta=tmp_path / "x.fasta",
@@ -168,3 +188,63 @@ def test_rt_align_disabled_returns_unchanged_rt():
     # RT.Aligned must equal RT exactly when alignment is off
     assert (aligned["RT.Aligned"] == aligned["RT"]).all()
     assert stats.empty
+
+
+def test_rt_align_uses_only_confident_anchors():
+    """Anchors must be filtered to Q.Value ≤ q_cutoff; noisy rows are excluded."""
+    df = _make_rt_dataset(n_anchors=200)
+    # poison half the runB rows with Q.Value > cutoff and huge RT offset
+    rng = np.random.default_rng(42)
+    noise_idx = df[df["filename"] == "runB.mzML"].sample(100, random_state=42).index
+    df.loc[noise_idx, "Q.Value"] = 0.5        # above cutoff
+    df.loc[noise_idx, "RT"] += rng.uniform(30, 60, size=100)  # big wrong offsets
+
+    aligned_strict, stats_strict = align_runs(df, RTAlignParams(q_cutoff=0.01))
+    aligned_loose,  stats_loose  = align_runs(df, RTAlignParams(q_cutoff=1.0))
+
+    runB_strict = stats_strict[stats_strict["filename"] == "runB.mzML"].iloc[0]
+    runB_loose  = stats_loose [stats_loose ["filename"] == "runB.mzML"].iloc[0]
+
+    # strict q_cutoff → fewer anchors but better (lower) post-alignment RMSE
+    assert runB_strict["n_anchors"] <= runB_loose["n_anchors"]
+    # strict must not be dramatically worse than loose (poison rows hurt the loose fit)
+    assert runB_strict["rmse_sec_after"] < runB_loose["rmse_sec_after"] * 2
+
+
+def test_rt_prediction_filter_removes_outliers():
+    """PSMs with |RT - Predicted.RT| > tolerance should be dropped."""
+    df = pd.DataFrame({
+        "filename": ["a.mzML"] * 5,
+        "peptide": [f"PEP{i}[+79.966331]R" for i in range(5)],
+        "charge": [2] * 5,
+        "Score": [30.0] * 5,
+        "RT": [10.0, 20.0, 30.0, 40.0, 50.0],
+        "Predicted.RT": [10.1, 20.2, 30.3, 30.0, 10.0],  # last two are outliers
+        "Peptide.Q.Value": [0.005] * 5,
+    })
+    tol = 5.0  # minutes
+    rt_err = (df["RT"] - df["Predicted.RT"]).abs()
+    filtered = df[rt_err <= tol]
+    assert len(filtered) == 4   # row 4 (|50-10|=40) is dropped
+    assert 4 not in filtered.index
+
+
+def test_multipass_peptide_fdr_is_respected(tmp_path):
+    """_config_for_pass must propagate peptide_fdr so parse_sage_tsv uses it."""
+    from diaquant.config import DiaQuantConfig
+    from diaquant.multipass import _config_for_pass
+    from diaquant.ptm_profiles import PASS_PROFILES
+
+    fasta = tmp_path / "x.fasta"
+    fasta.write_text(">sp|P00001|TEST_HUMAN test\nMAAAAA\n")
+    mzml = tmp_path / "y.mzML"
+    mzml.write_text("<placeholder/>")
+    base = DiaQuantConfig(
+        fasta=fasta, mzml_files=[mzml],
+        output_dir=tmp_path / "out",
+        peptide_fdr=0.05,
+    )
+    base.output_dir.mkdir(exist_ok=True)
+    profile = PASS_PROFILES["phospho"]
+    pcfg = _config_for_pass(base, profile)
+    assert pcfg.peptide_fdr == 0.05   # must survive the copy

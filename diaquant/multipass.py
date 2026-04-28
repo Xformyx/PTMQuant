@@ -30,7 +30,7 @@ import pandas as pd
 from .config import DiaQuantConfig
 from .parse_sage import attach_fasta_meta, parse_sage_tsv
 from .ptm_profiles import PassProfile, resolve_passes
-from .sage_runner import run_sage
+from .sage_runner import run_sage, run_sage_batched
 
 
 def _config_for_pass(base: DiaQuantConfig, profile: PassProfile) -> DiaQuantConfig:
@@ -71,8 +71,17 @@ def _annotate_pass(df: pd.DataFrame, profile: PassProfile) -> pd.DataFrame:
     return df
 
 
-def run_multipass(base: DiaQuantConfig) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
+def run_multipass(base: DiaQuantConfig, resume: bool = False) -> Tuple[pd.DataFrame, Dict[str, pd.DataFrame]]:
     """Execute every selected pass and return the merged long table.
+
+    Parameters
+    ----------
+    base : DiaQuantConfig
+    resume : bool
+        When True, skip the Sage search for any pass whose
+        ``pass_{name}/sage/results.sage.tsv`` already exists on disk.
+        Useful for resuming an interrupted run without re-doing expensive
+        database searches.
 
     Returns
     -------
@@ -93,7 +102,16 @@ def run_multipass(base: DiaQuantConfig) -> Tuple[pd.DataFrame, Dict[str, pd.Data
               f"vars={profile.variable_modifications} "
               f"missed_cleavages={profile.missed_cleavages or base.missed_cleavages}")
         pass_cfg = _config_for_pass(base, profile)
-        sage_tsv = run_sage(pass_cfg)
+
+        # Resume mode: reuse existing Sage results if present
+        cached_tsv = pass_cfg.output_dir / "sage" / "results.sage.tsv"
+        if resume and cached_tsv.exists():
+            print(f"[diaquant] -> pass '{profile.name}': "
+                  f"cached results found ({cached_tsv}), skipping Sage search.")
+            sage_tsv = cached_tsv
+        else:
+            sage_tsv = run_sage_batched(pass_cfg)
+
         df = parse_sage_tsv(sage_tsv,
                             site_cutoff=pass_cfg.site_probability_cutoff,
                             peptide_fdr=pass_cfg.peptide_fdr)

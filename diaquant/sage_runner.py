@@ -14,10 +14,14 @@ invoking the binary, capturing stdout/stderr and returning the path to the
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import Dict, List
+
+import pandas as pd
 
 from .config import DiaQuantConfig
 from .modifications import Modification, resolve_modifications
@@ -160,3 +164,53 @@ def run_sage(cfg: DiaQuantConfig) -> Path:
             "Check the Sage stdout above."
         )
     return results
+
+
+def run_sage_batched(cfg: DiaQuantConfig) -> Path:
+    """Run Sage in memory-safe batches and merge results.
+
+    When ``cfg.batch_size > 0`` and there are more files than ``batch_size``,
+    Sage is executed ``ceil(n / batch_size)`` times, each time on a subset of
+    the mzML files.  The ``results.sage.tsv`` files are concatenated and a
+    merged TSV is written to the normal output location.
+
+    When batching is not needed (batch_size==0 or files fit in one batch) this
+    falls back to a normal ``run_sage()`` call.
+    """
+    all_files = list(cfg.mzml_files)
+    n = len(all_files)
+    bs = cfg.batch_size
+
+    if bs <= 0 or bs >= n:
+        return run_sage(cfg)
+
+    batches = [all_files[i: i + bs] for i in range(0, n, bs)]
+    n_batches = len(batches)
+    print(f"[diaquant] auto-batch: {n} files → {n_batches} batches of ≤{bs} files")
+
+    merged_dir = Path(cfg.output_dir) / "sage"
+    merged_dir.mkdir(parents=True, exist_ok=True)
+
+    result_tsvs: List[Path] = []
+    for idx, batch in enumerate(batches):
+        batch_cfg = replace(cfg)
+        batch_cfg.mzml_files = batch
+        batch_cfg.output_dir = Path(cfg.output_dir) / f"sage_batch_{idx}"
+        print(f"[diaquant] batch {idx + 1}/{n_batches}: {[p.name for p in batch]}")
+        result_tsvs.append(run_sage(batch_cfg))
+
+    # Merge all results.sage.tsv → single file in the canonical sage/ dir
+    print(f"[diaquant] merging {n_batches} batch results...")
+    dfs = [pd.read_csv(tsv, sep="\t") for tsv in result_tsvs]
+    merged_df = pd.concat(dfs, ignore_index=True)
+    merged_path = merged_dir / "results.sage.tsv"
+    merged_df.to_csv(merged_path, sep="\t", index=False)
+
+    # Also create a stub sage_config.json pointing at the merged output
+    # so downstream code (parse_sage_tsv) can find it
+    stub_config = {"batches": n_batches, "total_files": n, "batch_size": bs}
+    (merged_dir / "sage_config.json").write_text(
+        json.dumps(stub_config, indent=2)
+    )
+    print(f"[diaquant] merged {len(merged_df)} PSMs from {n_batches} batches → {merged_path}")
+    return merged_path

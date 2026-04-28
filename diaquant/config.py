@@ -95,6 +95,12 @@ class DiaQuantConfig:
     threads: int = 0                        # 0 = autodetect
     sage_binary: str = "sage"
 
+    # ---- auto-batching ----
+    # When > 0, Sage is run ceil(n_files / batch_size) times and results are
+    # merged before downstream analysis.  Use this when RAM is insufficient to
+    # load all mzML files at once.  0 = no batching (all files in one run).
+    batch_size: int = 0
+
     @staticmethod
     def from_yaml(path: str | Path) -> "DiaQuantConfig":
         path = Path(path)

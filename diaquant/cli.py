@@ -30,7 +30,7 @@ from .parse_sage import attach_fasta_meta, parse_sage_tsv
 from .ptm_profiles import PASS_PROFILES, list_builtin_passes
 from .quantify import precursor_matrix, protein_quant, site_quant
 from .rt_align import RTAlignParams, align_runs, write_rt_stats
-from .sage_runner import run_sage
+from .sage_runner import run_sage, run_sage_batched
 from .stats import differential, load_sample_sheet
 from .writer import (
     PG_COLS,
@@ -130,20 +130,40 @@ def list_passes() -> None:
 @cli.command("run")
 @click.option("--config", "cfg_path", required=True,
               type=click.Path(exists=True, dir_okay=False))
-def run(cfg_path: str) -> None:
+@click.option("--resume", is_flag=True, default=False,
+              help="Skip Sage searches for passes where results.sage.tsv already exists. "
+                   "Useful for resuming an interrupted run.")
+def run(cfg_path: str, resume: bool) -> None:
     """Execute the full Sage → directLFQ → DIA-NN-style export pipeline."""
     cfg = DiaQuantConfig.from_yaml(cfg_path)
     click.secho(f"[diaquant {__version__}] starting", fg="green")
     click.echo(f"  fasta : {cfg.fasta}")
     click.echo(f"  mzml  : {len(cfg.mzml_files)} files")
     click.echo(f"  out   : {cfg.output_dir}")
+    if resume:
+        click.echo(f"  mode  : resume (cached Sage results will be reused)")
+
+    # Auto-batch report
+    if cfg.batch_size > 0 and cfg.batch_size < len(cfg.mzml_files):
+        import math
+        n_batches = math.ceil(len(cfg.mzml_files) / cfg.batch_size)
+        click.secho(
+            f"  auto-batch: {len(cfg.mzml_files)} files → {n_batches} batches "
+            f"of ≤{cfg.batch_size} files (memory-safe mode)",
+            fg="cyan",
+        )
 
     if cfg.passes or cfg.custom_passes:
         click.echo(f"  mode  : multi-pass ({cfg.passes + [p['name'] for p in cfg.custom_passes]})")
-        long_df, _per_pass = run_multipass(cfg)
+        long_df, _per_pass = run_multipass(cfg, resume=resume)
     else:
         click.echo(f"  mode  : single-pass (vars={cfg.variable_modifications})")
-        sage_tsv = run_sage(cfg)
+        cached_tsv = cfg.output_dir / "sage" / "results.sage.tsv"
+        if resume and cached_tsv.exists():
+            click.echo(f"  resume: cached Sage results found, skipping search.")
+            sage_tsv = cached_tsv
+        else:
+            sage_tsv = run_sage_batched(cfg)
         long_df = parse_sage_tsv(
             sage_tsv,
             site_cutoff=cfg.site_probability_cutoff,

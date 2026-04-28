@@ -3,11 +3,11 @@
 # Build the PTMQuant Docker image.
 #
 # Usage:
-#   ./build.sh                        # build with defaults
-#   ./build.sh -t ptmquant:0.3.0      # custom tag
-#   ./build.sh --platform linux/amd64 # force amd64 (required on Apple Silicon
-#                                     # because the bundled Sage binary is amd64)
+#   ./build.sh                        # default image (includes peptdeep if Dockerfile default)
+#   ./build.sh -t ptmquant:0.5.0      # custom tag
+#   ./build.sh --platform linux/amd64 # force amd64 (Apple Silicon: Sage binary is x86_64)
 #   ./build.sh --no-cache             # rebuild from scratch
+#   ./build.sh --build-arg WITH_ALPHAPEPTDEEP=0   # lean image (no AlphaPeptDeep / torch)
 #
 # Any extra args are forwarded to `docker build`.
 set -euo pipefail
@@ -34,7 +34,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            sed -n '2,12p' "$0"
+            sed -n '2,15p' "$0"
             exit 0
             ;;
         *)

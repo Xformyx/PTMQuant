@@ -134,6 +134,59 @@ PASS_PROFILES: Dict[str, PassProfile] = {
         max_precursor_charge=4,
         site_probability_cutoff=0.75,
     ),
+    # ---- New in 0.5.0: additional PTM families ----
+    "oglcnac": PassProfile(
+        name="oglcnac",
+        description=(
+            "O-linked N-acetyl-glucosamine (O-GlcNAc, UniMod:43, +203.08) on "
+            "S / T.  The modification does not block tryptic cleavage so "
+            "missed_cleavages stays at the default 2, but the fragment "
+            "tolerance is slightly relaxed because O-GlcNAc peptides show "
+            "prominent sugar-loss in-source fragmentation."
+        ),
+        variable_modifications=["Oxidation", "Acetyl_Nterm", "OGlcNAc"],
+        missed_cleavages=2,
+        max_variable_mods=2,
+        min_peptide_length=7,
+        max_peptide_length=30,
+        max_precursor_charge=4,
+        site_probability_cutoff=0.75,
+        fragment_tol_ppm=15.0,
+    ),
+    "citrullination": PassProfile(
+        name="citrullination",
+        description=(
+            "Arginine citrullination (UniMod:7, +0.984).  The 1 Da shift is "
+            "isobaric with deamidation on N/Q so high MS1 accuracy is "
+            "required; the pass otherwise mirrors the phospho profile but "
+            "keeps missed_cleavages at 2 (Arg is still cleaved by trypsin "
+            "if the modified residue is not the cleavage-site Arg itself)."
+        ),
+        variable_modifications=["Oxidation", "Acetyl_Nterm", "Citrullination"],
+        missed_cleavages=2,
+        max_variable_mods=2,
+        min_peptide_length=7,
+        max_peptide_length=30,
+        max_precursor_charge=4,
+        site_probability_cutoff=0.75,
+    ),
+    "lactyl_acyl": PassProfile(
+        name="lactyl_acyl",
+        description=(
+            "Less common K-acylations: lactyl, propionyl, butyryl.  Share "
+            "the K-acyl tryptic-block property, so missed_cleavages is 3."
+        ),
+        variable_modifications=[
+            "Oxidation", "Acetyl_Nterm",
+            "Lactyl", "Propionyl", "Butyryl",
+        ],
+        missed_cleavages=3,
+        max_variable_mods=2,
+        min_peptide_length=7,
+        max_peptide_length=35,
+        max_precursor_charge=4,
+        site_probability_cutoff=0.75,
+    ),
 }
 
 

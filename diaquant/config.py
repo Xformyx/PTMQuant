@@ -77,6 +77,53 @@ class DiaQuantConfig:
     # ---- DIA acquisition ----
     wide_window: bool = False               # True for SWATH / wide-window DIA (>10 m/z)
 
+    # ---- AlphaPeptDeep predicted spectral library (NEW in 0.5.0) ----
+    # When enabled, diaquant uses AlphaPeptDeep to pre-compute a predicted
+    # spectral library (RT + MS2 intensity per fragment) for every pass and
+    # then post-hoc re-scores the Sage PSMs with two extra features:
+    #    * pred_rt_delta   (observed RT vs predicted)
+    #    * frag_cosine     (cosine similarity of observed vs predicted MS2)
+    # This raises identification depth for all PTMs that DIA-NN cannot
+    # handle natively (acetyl, mono/di/tri-methyl, succinyl, malonyl,
+    # crotonyl, SUMO QQTGG remnants, citrullination, O-GlcNAc, lactyl, ...).
+    predicted_library: bool = True            # default ON per user request
+    pred_lib_instrument: str = "QE"          # AlphaPeptDeep instrument preset;
+                                              # 'QE' is the right choice for an
+                                              # Orbitrap Exploris 240.  Other
+                                              # supported values include
+                                              # 'Lumos', 'timsTOF', 'SciexTOF',
+                                              # 'ThermoTOF'.
+    pred_lib_nce: float = 27.0                # normalized collision energy
+                                              # (HCD).  Exploris 240 default ≈ 27.
+    pred_lib_model_dir: Optional[Path] = None  # override AlphaPeptDeep model
+                                              # cache dir.  Default: standard
+                                              # ~/peptdeep/pretrained_models
+                                              # installed by
+                                              # `peptdeep install-models`.
+    pred_lib_cache: bool = True               # cache the predicted library
+                                              # on disk and skip re-prediction
+                                              # on subsequent runs with the
+                                              # same FASTA + pass parameters.
+    pred_lib_transfer_learning: bool = False  # opt-in: after pass 1, fine-tune
+                                              # RT/MS2 on the user's own
+                                              # high-confidence PSMs before
+                                              # predicting subsequent passes.
+    pred_lib_transfer_epochs: int = 10        # epochs for the opt-in fine-tune.
+    pred_lib_fallback_in_silico: bool = True  # if AlphaPeptDeep prediction
+                                              # fails, fall back to Sage's
+                                              # built-in theoretical library
+                                              # rather than aborting the run.
+    # ---- Post-hoc PSM rescoring (NEW in 0.5.0) ----
+    rescore_with_prediction: bool = True      # use the predicted library to
+                                              # add pred_rt_delta and
+                                              # frag_cosine features to every
+                                              # Sage PSM and re-compute FDR.
+    rescore_rt_tol_min: float = 3.0           # |observed RT - predicted RT|
+                                              # cap (minutes).  PSMs beyond
+                                              # this are demoted, not dropped.
+    rescore_frag_cosine_cutoff: float = 0.0   # minimum fragment cosine to
+                                              # retain a PSM (0 = disabled).
+
     # ---- run-to-run RT alignment (LOWESS) ----
     rt_alignment: bool = True               # always-on by default per user request
     rt_align_frac: float = 0.2              # LOWESS smoothing fraction

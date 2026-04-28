@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -225,7 +226,9 @@ def test_rt_prediction_filter_removes_outliers():
     tol = 5.0  # minutes
     rt_err = (df["RT"] - df["Predicted.RT"]).abs()
     filtered = df[rt_err <= tol]
-    assert len(filtered) == 4   # row 4 (|50-10|=40) is dropped
+    # rows 3 (|40-30|=10) and 4 (|50-10|=40) exceed the 5 min tolerance
+    assert len(filtered) == 3
+    assert 3 not in filtered.index
     assert 4 not in filtered.index
 
 
@@ -248,3 +251,129 @@ def test_multipass_peptide_fdr_is_respected(tmp_path):
     profile = PASS_PROFILES["phospho"]
     pcfg = _config_for_pass(base, profile)
     assert pcfg.peptide_fdr == 0.05   # must survive the copy
+
+
+# ---------------------------------------------------------------------------
+# 0.5.0: new built-in PTMs, new passes, predicted library + rescoring
+# ---------------------------------------------------------------------------
+
+def test_new_builtin_modifications_present():
+    """0.5.0 adds O-GlcNAc, Lactyl, Propionyl, Butyryl and Sulfation."""
+    for name in ("OGlcNAc", "Lactyl", "Propionyl", "Butyryl", "Sulfation"):
+        assert name in DEFAULT_MODIFICATIONS, f"missing built-in mod: {name}"
+    assert DEFAULT_MODIFICATIONS["OGlcNAc"].targets == ("S", "T")
+    assert DEFAULT_MODIFICATIONS["Lactyl"].targets == ("K",)
+
+
+def test_new_builtin_passes_present():
+    """0.5.0 adds oglcnac, citrullination and lactyl_acyl passes."""
+    for name in ("oglcnac", "citrullination", "lactyl_acyl"):
+        assert name in PASS_PROFILES
+    # oglcnac keeps missed_cleavages at 2 (GlcNAc does not block tryptic cleavage)
+    assert PASS_PROFILES["oglcnac"].missed_cleavages == 2
+    # lactyl_acyl raises it to 3 like the other K-acyl passes
+    assert PASS_PROFILES["lactyl_acyl"].missed_cleavages == 3
+
+
+def test_map_modifications_expands_residues():
+    """PTMQuant mods with multiple target residues become one AlphaPeptDeep
+    entry per residue; stem and residue aliases are applied."""
+    from diaquant.predicted_library import map_modifications
+
+    mods = [
+        DEFAULT_MODIFICATIONS["Carbamidomethyl"],
+        DEFAULT_MODIFICATIONS["Phospho"],
+        DEFAULT_MODIFICATIONS["GlyGly"],
+        DEFAULT_MODIFICATIONS["Acetyl_Nterm"],
+    ]
+    fix_mods, var_mods = map_modifications(mods)
+    assert fix_mods == ["Carbamidomethyl@C"]
+    assert "Phospho@S" in var_mods
+    assert "Phospho@T" in var_mods
+    assert "Phospho@Y" in var_mods
+    assert "GG@K" in var_mods
+    assert "Acetyl@Protein_N-term" in var_mods
+
+
+def test_predicted_library_disabled_returns_none(tmp_path):
+    """When predicted_library=False the generator short-circuits without
+    importing AlphaPeptDeep (works on a stock install)."""
+    from diaquant.predicted_library import generate_predicted_library
+    fasta = tmp_path / "mini.fasta"
+    fasta.write_text(">sp|TEST|TEST_HUMAN\nMAAAAS\n")
+    cfg = DiaQuantConfig(
+        fasta=fasta,
+        mzml_files=[tmp_path / "x.mzML"],
+        output_dir=tmp_path,
+        predicted_library=False,
+    )
+    assert generate_predicted_library(cfg, tmp_path) is None
+
+
+def test_rescore_canonical_key_matches_name_and_mass():
+    """Sage Δmass and AlphaPeptDeep name brackets hash to the same key."""
+    from diaquant.rescore import _canonical_mod_key
+    assert _canonical_mod_key("PEPS[+79.97]TIDE") == \
+           _canonical_mod_key("PEPS[Phospho]TIDE")
+    assert _canonical_mod_key("ACK[+42.01]LY") == \
+           _canonical_mod_key("ACK[Acetyl]LY")
+
+
+def test_rescore_joins_and_demotes(tmp_path):
+    """Matched PSMs get Pred.RT / Pred.RT.Delta; RT outliers beyond the
+    tolerance have their Score halved (demoted, not dropped)."""
+    from diaquant.rescore import rescore_with_predicted_library
+
+    lib = pd.DataFrame({
+        "ModifiedPeptide": ["PEPS[Phospho]TIDE", "ACK[Acetyl]LY"],
+        "PrecursorCharge": [2, 2],
+        "iRT": [10.2, 25.0],
+    })
+    lib_path = tmp_path / "lib.tsv"
+    lib.to_csv(lib_path, sep="\t", index=False)
+
+    psm = pd.DataFrame({
+        "Modified.Sequence": ["PEPS[+79.97]TIDE", "ACK[Acetyl]LY"],
+        "Precursor.Charge": [2, 2],
+        "RT": [10.0, 20.0],
+        "Score": [5.0, 5.0],
+        "filename": ["x.mzML", "x.mzML"],
+    })
+    cfg = DiaQuantConfig(
+        fasta=tmp_path / "f.fa",
+        mzml_files=[tmp_path / "x.mzML"],
+        output_dir=tmp_path,
+        rescore_rt_tol_min=3.0,
+    )
+    out = rescore_with_predicted_library(psm, lib_path, cfg)
+    assert abs(out.loc[0, "Pred.RT"] - 10.2) < 1e-6
+    assert out.loc[0, "Pred.RT.Delta"] < 1.0
+    assert out.loc[0, "Score"] == 5.0
+    assert out.loc[1, "Pred.RT.Delta"] > 3.0
+    assert out.loc[1, "Score"] == 2.5
+
+
+def test_rescore_skipped_when_disabled(tmp_path):
+    """rescore_with_prediction=False returns the frame unchanged, letting
+    users reproduce 0.4.x behaviour exactly."""
+    from diaquant.rescore import rescore_with_predicted_library
+    psm = pd.DataFrame({
+        "Modified.Sequence": ["PEPS[+79.97]TIDE"],
+        "Precursor.Charge": [2],
+        "RT": [10.0],
+        "Score": [5.0],
+        "filename": ["x.mzML"],
+    })
+    cfg = DiaQuantConfig(
+        fasta=tmp_path / "f.fa",
+        mzml_files=[tmp_path / "x.mzML"],
+        output_dir=tmp_path,
+        rescore_with_prediction=False,
+    )
+    out = rescore_with_predicted_library(psm, tmp_path / "missing.tsv", cfg)
+    assert list(out.columns) == list(psm.columns)
+
+
+def test_version_is_050():
+    import diaquant
+    assert diaquant.__version__ == "0.5.0"

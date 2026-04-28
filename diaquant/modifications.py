@@ -57,6 +57,12 @@ DEFAULT_MODIFICATIONS: Dict[str, Modification] = {
     "Crotonyl":         Modification("Crotonyl",       1363, 68.026215, ("K",)),
     "Sumo_QQTGG":       Modification("Sumo_QQTGG",    1340, 471.207606, ("K",)),
     "Citrullination":   Modification("Citrullination",  7, 0.984016, ("R",)),
+    # extra built-ins added in 0.5.0 so the corresponding passes work out-of-the-box
+    "OGlcNAc":          Modification("OGlcNAc",        43, 203.079373, ("S", "T")),
+    "Lactyl":           Modification("Lactyl",       2114, 72.021129, ("K",)),
+    "Propionyl":        Modification("Propionyl",      58, 56.026215, ("K",)),
+    "Butyryl":          Modification("Butyryl",     1289, 70.041865, ("K",)),
+    "Sulfation":        Modification("Sulfation",      40, 79.956815, ("Y",)),
 }
 
 

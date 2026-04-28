@@ -29,7 +29,9 @@ import pandas as pd
 
 from .config import DiaQuantConfig
 from .parse_sage import attach_fasta_meta, parse_sage_tsv
+from .predicted_library import fine_tune_models, generate_predicted_library
 from .ptm_profiles import PassProfile, resolve_passes
+from .rescore import rescore_with_predicted_library
 from .sage_runner import run_sage, run_sage_batched
 
 
@@ -97,13 +99,35 @@ def run_multipass(base: DiaQuantConfig, resume: bool = False) -> Tuple[pd.DataFr
     )
 
     per_pass: Dict[str, pd.DataFrame] = {}
-    for profile in profiles:
+    for i, profile in enumerate(profiles):
         print(f"[diaquant] -> pass '{profile.name}': "
               f"vars={profile.variable_modifications} "
               f"missed_cleavages={profile.missed_cleavages or base.missed_cleavages}")
         pass_cfg = _config_for_pass(base, profile)
 
-        # Resume mode: reuse existing Sage results if present
+        # ---- 0.5.0: generate predicted spectral library before searching --
+        # The TSV is written inside the pass's output dir and also reused
+        # after the Sage search for post-hoc rescoring.  A ``None`` return
+        # simply means we fall back to the 0.4.x behaviour (no rescoring).
+        library_tsv = None
+        if pass_cfg.predicted_library:
+            try:
+                library_tsv = generate_predicted_library(
+                    pass_cfg,
+                    out_dir=pass_cfg.output_dir,
+                    pass_label=profile.name,
+                )
+            except Exception as exc:                                # pragma: no cover
+                if pass_cfg.pred_lib_fallback_in_silico:
+                    print(f"[diaquant]    predicted library failed ({exc}); "
+                          f"falling back to Sage built-in.")
+                    library_tsv = None
+                else:
+                    raise
+
+        # Resume mode: reuse existing Sage results if present; otherwise
+        # run the (auto-batched) Sage search so both the 0.4.x resume
+        # feature and the 0.5.0 predicted-library feature stay compatible.
         cached_tsv = pass_cfg.output_dir / "sage" / "results.sage.tsv"
         if resume and cached_tsv.exists():
             print(f"[diaquant] -> pass '{profile.name}': "
@@ -116,10 +140,25 @@ def run_multipass(base: DiaQuantConfig, resume: bool = False) -> Tuple[pd.DataFr
                             site_cutoff=pass_cfg.site_probability_cutoff,
                             peptide_fdr=pass_cfg.peptide_fdr)
         df = attach_fasta_meta(df, pass_cfg.fasta)
+
+        # ---- 0.5.0: post-hoc rescoring with AlphaPeptDeep RT prediction ----
+        if pass_cfg.rescore_with_prediction and library_tsv is not None:
+            df = rescore_with_predicted_library(df, library_tsv, pass_cfg)
+
         df = _annotate_pass(df, profile)
         per_pass[profile.name] = df
         print(f"[diaquant]    pass '{profile.name}': "
               f"{len(df)} precursor rows after FDR.")
+
+        # ---- 0.5.0: optional transfer learning after the first pass -------
+        # Fine-tunes RT / MS2 on the user's own high-confidence PSMs so that
+        # every *subsequent* pass re-predicts with run-adapted weights.
+        if (i == 0
+                and pass_cfg.pred_lib_transfer_learning
+                and not df.empty):
+            hi_conf = df[df.get("Q.Value",
+                                pd.Series([0.0]*len(df))).astype(float) <= 0.01]
+            fine_tune_models(pass_cfg, hi_conf)
 
     if not per_pass:
         raise RuntimeError("No passes produced output.")

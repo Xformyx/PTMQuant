@@ -23,6 +23,10 @@ passes:
   - acetyl_methyl     # K-acetyl + K/R mono/di/tri-methyl
   # - ubiquitin       # K-GG (rare without enrichment)
   # - succinyl_acyl   # K-Succinyl/Malonyl/Crotonyl
+  # ---- 0.5.0: new built-in passes ----
+  # - oglcnac         # O-GlcNAc on S/T (UniMod:43)
+  # - citrullination  # R citrullination (UniMod:7)
+  # - lactyl_acyl     # K-Lactyl/Propionyl/Butyryl
 
 # Custom passes can be added if a built-in profile is not enough:
 custom_passes: []
@@ -60,6 +64,17 @@ match_between_runs: true
 scoring_mode: peptidoforms
 machine_learning: nn_cv
 wide_window: false
+
+# ---- 0.5.0: AlphaPeptDeep predicted spectral library + rescoring ----
+predicted_library: true            # set to false to reproduce 0.4.x behaviour
+pred_lib_instrument: QE            # one of: QE, Lumos, timsTOF, SciexTOF, ThermoTOF
+pred_lib_nce: 27.0                 # Exploris 240 normalized collision energy
+pred_lib_cache: true               # reuse the predicted library TSV if nothing changed
+pred_lib_transfer_learning: false  # opt-in: fine-tune RT/MS2 on your own high-conf PSMs
+pred_lib_fallback_in_silico: true  # safely fall back if AlphaPeptDeep is unavailable
+rescore_with_prediction: true      # append Pred.RT / Pred.RT.Delta to report.tsv
+rescore_rt_tol_min: 3.0            # minutes; PSMs beyond this are demoted, not dropped
+rescore_frag_cosine_cutoff: 0.0    # >0 enables mzML-based MS2 cosine (slow, opt-in)
 
 # ---- LOWESS run-to-run RT alignment (always-on, recommended) ----
 rt_alignment: true

@@ -16,7 +16,7 @@ The whole stack is permissively licensed (Apache-2.0 / MIT) and can therefore be
 | 4. RT alignment | `diaquant.rt_align` | Apache-2.0 | LOWESS run-to-run retention-time alignment (always-on) |
 | 5. Output | `diaquant.writer` | Apache-2.0 | DIA-NN-style `report.pr_matrix.tsv`, `report.pg_matrix.tsv`, plus PTM-site matrix and RT-alignment statistics |
 
-The optional `[deeplearning]` extra installs **AlphaPeptDeep** (Apache-2.0) to enable on-the-fly RT/MS² prediction and transfer learning for non-canonical PTMs.
+The optional `[deeplearning]` extra installs **AlphaPeptDeep** (Apache-2.0) to enable on-the-fly RT/MS² prediction and transfer learning for non-canonical PTMs (introduced in 0.5.0).
 
 ## Installation
 
@@ -73,8 +73,19 @@ Built-in passes:
 | `whole_proteome` | `Oxidation`, `Acetyl_Nterm` | 2 | Backbone for protein-group quantification |
 | `phospho` | + `Phospho` (STY) | 2 | Site probability cut-off 0.75, length 7–30 |
 | `ubiquitin` | + `GlyGly` (K) | 3 | GG remnant blocks tryptic K cleavage |
-| `acetyl_methyl` | + `Acetyl`, `Methyl`, `Dimethyl`, `Trimethyl` | 3 | Acyl/methyl K mods block cleavage; **DIA-NN cannot quantify these reliably** |
+| `acetyl_methyl` | + `Acetyl`, `Methyl`, `Dimethyl`, `Trimethyl` | 3 | Acyl/methyl K mods block cleavage; **DIA-NN cannot quantify these reliably**. Grouped together because they compete for the same K residues and are often studied together. |
 | `succinyl_acyl` | + `Succinyl`, `Malonyl`, `Crotonyl` | 3 | Same K-acyl rationale |
+| `oglcnac` (0.5.0) | + `OGlcNAc` (ST) | 2 | O-GlcNAc does not block tryptic cleavage, so `missed_cleavages` stays at 2. Fragment tolerance relaxed to 15 ppm for sugar loss. |
+| `citrullination` (0.5.0) | + `Citrullination` (R) | 2 | Isobaric with deamidation (+0.984 Da); requires high MS1 accuracy. |
+| `lactyl_acyl` (0.5.0) | + `Lactyl`, `Propionyl`, `Butyryl` | 3 | Less common K-acylations, grouped because they all block tryptic cleavage at K. |
+
+### Why are some PTMs grouped together (e.g., Methyl + Acetyl)?
+In multi-pass mode, PTMs that compete for the same residue (like K-acetylation and K-methylation) or share the same enzymatic cleavage behavior (like all K-acylations blocking trypsin) are grouped into a single pass. This allows the search engine to correctly assign the modification when multiple isobaric or near-isobaric possibilities exist on the same peptide, without blowing up the search space for unrelated PTMs (like phosphorylation).
+
+### How enzyme rules are handled
+By default, diaquant uses `trypsin` (cleaves at K/R, except when followed by P). The `missed_cleavages` parameter is handled at two levels:
+1. **Global default**: Set in the main config (usually 2).
+2. **Pass-specific override**: PTMs that structurally block the protease (like K-acetylation blocking trypsin) automatically override the global setting for their specific pass (e.g., `missed_cleavages = 3`).
 
 User-defined passes can be added under `custom_passes:` in YAML — see `configs/preset_wholeproteome_multipass.yaml` for an example. Selecting only the passes you need keeps the run focused and the search space small.
 
@@ -154,13 +165,15 @@ DIA-NN's MiniDNN was trained primarily on phosphorylation and GlyGly data, so no
 
 1. **Search-engine independence from any PTM-trained NN.** Sage matches fragments by m/z; arbitrary mass shifts are accepted without retraining.
 2. **Site-level directLFQ instead of Top-1 quantification.** DIA-NN reports the single strongest peptidoform per site; `diaquant` aggregates every supporting precursor with the directLFQ ratio model.
-3. **One-line custom PTMs.** Add an entry under `custom_modifications:` in the YAML — no recompilation, no model fine-tuning needed:
+3. **AlphaPeptDeep predicted spectral libraries (New in 0.5.0).** diaquant automatically generates a full-proteome predicted spectral library for *any* combination of PTMs using AlphaPeptDeep's transformer models. The predicted RT is then used to rescore Sage PSMs (`Pred.RT.Delta`), heavily penalizing false positives for rare PTMs.
+4. **Transfer learning (New in 0.5.0).** Opt-in fine-tuning of the AlphaPeptDeep RT/MS2 models using the high-confidence PSMs from your own first pass, adapting the predictions to your exact LC gradient and collision energy.
+5. **One-line custom PTMs.** Add an entry under `custom_modifications:` in the YAML — no recompilation, no model fine-tuning needed. If AlphaPeptDeep knows the UniMod name, it will even predict the RT/MS2 correctly:
    ```yaml
    custom_modifications:
-     - name: Lactyl
-       unimod_id: 2114
-       mass_shift: 72.021129
-       targets: [K]
+     - name: ADP_Ribosyl
+       unimod_id: 213
+       mass_shift: 541.06111
+       targets: [D, E, R, K]
    ```
 
 ## Sample sheet and differential analysis
@@ -180,7 +193,7 @@ When the sample sheet is referenced from the YAML (`sample_sheet: configs/sample
 
 ## Roadmap
 
-The next minor version will replace the softmax-based site localization with an AlphaPeptDeep-rescored Δ-score and add an on-the-fly transfer-learning step that fine-tunes RT/MS² predictions per experiment, matching the AlphaDIA paradigm while remaining fully Apache-2.0. AlphaPeptDeep predictions will additionally be used as a *third* anchor source for RT alignment, allowing accurate alignment even for runs whose shared-PSM count falls below `rt_align_min_anchors`.
+Future versions will expand the AlphaPeptDeep integration to replace the softmax-based site localization with a predicted-MS2 Δ-score, and use the AlphaPeptDeep predictions as a *third* anchor source for RT alignment, allowing accurate alignment even for runs whose shared-PSM count falls below `rt_align_min_anchors`.
 
 ## Licence
 

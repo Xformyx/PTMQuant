@@ -21,8 +21,19 @@ class DiaQuantConfig:
     mzml_files: List[Path]
     output_dir: Path
 
+    # ---- instrument preset (NEW in 0.5.1) ----
+    # Selects a family of numeric defaults (tolerances, m/z range, NCE,
+    # AlphaPeptDeep instrument tag) appropriate for the listed Orbitrap
+    # generation.  Accepted values: 'exploris_240' (default, matches 0.4.x),
+    # 'orbitrap_astral', 'orbitrap_eclipse', 'fusion_lumos'.  A value that the
+    # user sets explicitly in the YAML *always* wins over the preset.
+    instrument: str = "exploris_240"
+
     # ---- enzyme / digestion (DIA-NN parlance: "Protease", "Missed cleavages") ----
-    enzyme: str = "trypsin"                 # 'trypsin' (=Trypsin/P), 'lys-c', 'no-cleavage'
+    # Full catalog lives in :mod:`diaquant.enzymes`.  Accepted values include
+    # 'trypsin' (= Trypsin/P, default), 'trypsin-strict', 'lys-c', 'lys-c-strict',
+    # 'arg-c', 'asp-n', 'glu-c', 'chymotrypsin' and 'no-cleavage'.
+    enzyme: str = "trypsin"
     missed_cleavages: int = 2
     min_peptide_length: int = 7
     max_peptide_length: int = 30
@@ -172,6 +183,15 @@ class DiaQuantConfig:
                 continue
             if hasattr(cfg, k):
                 setattr(cfg, k, v)
+        # Resolve instrument preset *after* the user's YAML values have been
+        # applied so that explicit user values still win.  apply_preset only
+        # overwrites fields whose value still equals the 0.4.x default.
+        from .instruments import apply_preset, get_instrument
+        apply_preset(cfg, get_instrument(cfg.instrument))
+        # Validate the enzyme eagerly so the user sees a clear error instead
+        # of a cryptic Sage failure later in the pipeline.
+        from .enzymes import get_enzyme
+        get_enzyme(cfg.enzyme)
         # Coerce sample_sheet to Path if provided.
         if cfg.sample_sheet is not None and not isinstance(cfg.sample_sheet, Path):
             cfg.sample_sheet = Path(cfg.sample_sheet)

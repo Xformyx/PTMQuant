@@ -82,10 +82,20 @@ Built-in passes:
 ### Why are some PTMs grouped together (e.g., Methyl + Acetyl)?
 In multi-pass mode, PTMs that compete for the same residue (like K-acetylation and K-methylation) or share the same enzymatic cleavage behavior (like all K-acylations blocking trypsin) are grouped into a single pass. This allows the search engine to correctly assign the modification when multiple isobaric or near-isobaric possibilities exist on the same peptide, without blowing up the search space for unrelated PTMs (like phosphorylation).
 
-### How enzyme rules are handled
+### Enzyme catalog (New in 0.5.1)
 By default, diaquant uses `trypsin` (cleaves at K/R, except when followed by P). The `missed_cleavages` parameter is handled at two levels:
 1. **Global default**: Set in the main config (usually 2).
 2. **Pass-specific override**: PTMs that structurally block the protease (like K-acetylation blocking trypsin) automatically override the global setting for their specific pass (e.g., `missed_cleavages = 3`).
+
+You can override the protease globally via the `--enzyme` CLI flag or `enzyme:` YAML key. The built-in catalog includes:
+- `trypsin` (default, Trypsin/P)
+- `trypsin-strict` (cleaves at all K/R)
+- `lys-c` (Lys-C/P)
+- `lys-c-strict` (cleaves at all K)
+- `arg-c`, `asp-n`, `glu-c`, `chymotrypsin`
+- `no-cleavage` (top-down / unspecific)
+
+Run `diaquant list-enzymes` for the exact cleavage rules applied by Sage.
 
 User-defined passes can be added under `custom_passes:` in YAML — see `configs/preset_wholeproteome_multipass.yaml` for an example. Selecting only the passes you need keeps the run focused and the search space small.
 
@@ -110,11 +120,11 @@ Every field in DIA-NN's GUI has an equivalent in the diaquant YAML so you can mi
 | Missed cleavages | `missed_cleavages` | `2` |
 | Peptide length | `min_peptide_length`, `max_peptide_length` | `7`, `30` |
 | Precursor charge | `min_precursor_charge`, `max_precursor_charge` | `2`, `4` |
-| Precursor m/z | `min_precursor_mz`, `max_precursor_mz` | `400`, `1000` |
+| Precursor m/z | `min_precursor_mz`, `max_precursor_mz` | `400`, `1000` (via preset) |
 | Fragment ion m/z | `min_fragment_mz`, `max_fragment_mz` | `200`, `1500` |
-| MS1 accuracy (ppm) | `precursor_tol_ppm` | `6` |
-| MS2 accuracy (ppm) | `fragment_tol_ppm` | `12` |
-| Library MS1 / MS2 (ppm) | `library_precursor_tol_ppm`, `library_fragment_tol_ppm` | `8`, `15` |
+| MS1 accuracy (ppm) | `precursor_tol_ppm` | `6` (via preset) |
+| MS2 accuracy (ppm) | `fragment_tol_ppm` | `12` (via preset) |
+| Library MS1 / MS2 (ppm) | `library_precursor_tol_ppm`, `library_fragment_tol_ppm` | `8`, `15` (via preset) |
 | Variable modifications | `variable_modifications` | — |
 | Max var modifications | `max_variable_mods` | `2` |
 | Scoring | `scoring_mode` | `peptidoforms` |
@@ -122,9 +132,20 @@ Every field in DIA-NN's GUI has an equivalent in the diaquant YAML so you can mi
 | Quantification | (always QuantUMS-equivalent via directLFQ) | — |
 | NNs cross-validated | `machine_learning` | `nn_cv` |
 
-## Notes on Thermo Orbitrap Exploris 240 (and other narrow-window DIA instruments)
+## Instrument Presets (New in 0.5.1)
 
-The defaults above are tuned to the actual acquisition window observed in the user's data: 100 staggered 6 m/z windows centered between **403 and ≈ 1000 m/z**, MS1 every ~50 MS2 scans. Three settings in the original DIA-NN parameter files were adjusted in the diaquant presets to better match this acquisition:
+Orbitrap generations have meaningfully different mass accuracy, usable precursor ranges, and optimal collision energies. Rather than manually tuning 7 different YAML fields, diaquant 0.5.1 provides curated presets. Set `instrument:` in the YAML or use `--instrument` in `init-config`:
+
+| Preset | MS1 / MS2 (ppm) | Precursor m/z | NCE | AlphaPeptDeep model | Notes |
+|---|---|---|---|---|---|
+| `exploris_240` (default) | 6 / 12 | 400–1000 | 28 | QE | Exploris 240, narrow DIA (6 m/z). |
+| `orbitrap_astral` | 3 / 8 | 380–980 | 27 | Lumos | Astral analyser; tighter tolerances exploit the 2 ppm MS1 spec. |
+| `orbitrap_eclipse` | 5 / 10 | 350–1500 | 30 | Lumos | Eclipse Tribrid; wider precursor range. |
+| `fusion_lumos` | 5 / 12 | 350–1500 | 30 | Lumos | Fusion Lumos; legacy Orbitrap baseline. |
+
+**Note**: A value explicitly set in the YAML *always* wins over the preset. If you select `orbitrap_astral` but explicitly write `precursor_tol_ppm: 5.0`, diaquant respects your 5.0 ppm choice.
+
+The defaults above are tuned to the actual acquisition window observed in the user's Exploris 240 data: 100 staggered 6 m/z windows centered between **403 and ≈ 1000 m/z**, MS1 every ~50 MS2 scans. Three settings in the original DIA-NN parameter files were adjusted in the diaquant presets to better match this acquisition:
 
 1. **`min_precursor_mz` raised from 350 to 400** — DIA-NN was set to start at 350 m/z but the lowest isolation centre is 403 m/z, so peptides under 400 m/z were never sampled.
 2. **`max_peptide_length` and `max_precursor_charge` unified** between identification and library generation. The original Phospho library YAML used 35 / 6 vs. the identification's 30 / 4, which silently dropped library precursors at search time.

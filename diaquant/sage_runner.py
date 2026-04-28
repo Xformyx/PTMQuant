@@ -24,6 +24,7 @@ from typing import Dict, List
 import pandas as pd
 
 from .config import DiaQuantConfig
+from .enzymes import get_enzyme, to_sage_enzyme_block
 from .modifications import Modification, resolve_modifications
 
 
@@ -85,17 +86,16 @@ def build_sage_config(cfg: DiaQuantConfig) -> dict:
         - cfg.max_precursor_charge * proton,
     )
 
+    enzyme_rule = get_enzyme(cfg.enzyme)
     sage = {
         "database": {
             "bucket_size": 32768,
-            "enzyme": {
-                "missed_cleavages": cfg.missed_cleavages,
-                "min_len": cfg.min_peptide_length,
-                "max_len": cfg.max_peptide_length,
-                "cleave_at": "KR" if cfg.enzyme == "trypsin" else (
-                    "K" if cfg.enzyme == "lys-c" else "$"),
-                "restrict": "P" if cfg.enzyme == "trypsin" else None,
-            },
+            "enzyme": to_sage_enzyme_block(
+                enzyme_rule,
+                missed_cleavages=cfg.missed_cleavages,
+                min_len=cfg.min_peptide_length,
+                max_len=cfg.max_peptide_length,
+            ),
             "fragment_min_mz": cfg.min_fragment_mz,
             "fragment_max_mz": cfg.max_fragment_mz,
             "peptide_min_mass": peptide_min_mass,

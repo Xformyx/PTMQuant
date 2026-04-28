@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "diaquant"
-version = "0.5.0"
+version = "0.5.1"
 description = "Open-source DIA proteomics quantification pipeline with universal PTM support (Sage + directLFQ + AlphaPeptDeep)"
 authors = [{name = "Manus AI"}]
 license = {text = "Apache-2.0"}

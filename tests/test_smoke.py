@@ -375,5 +375,110 @@ def test_rescore_skipped_when_disabled(tmp_path):
 
 
 def test_version_is_050():
+    """The package reports a 0.5.x version (kept name for git-history grep)."""
     import diaquant
-    assert diaquant.__version__ == "0.5.0"
+    assert diaquant.__version__.startswith("0.5.")
+
+
+# ---------------------------------------------------------------------------
+# 0.5.1: enzyme catalog + instrument preset smoke tests
+# ---------------------------------------------------------------------------
+
+def test_enzyme_catalog_exposes_expected_rules():
+    from diaquant.enzymes import ENZYME_CATALOG, get_enzyme, to_sage_enzyme_block
+
+    for key in ("trypsin", "lys-c", "no-cleavage", "arg-c", "asp-n",
+                "glu-c", "chymotrypsin", "trypsin-strict", "lys-c-strict"):
+        assert key in ENZYME_CATALOG, f"enzyme '{key}' missing from catalog"
+
+    t = get_enzyme("trypsin")
+    assert t.cleave_at == "KR" and t.restrict == "P"
+    ts = get_enzyme("trypsin-strict")
+    assert ts.cleave_at == "KR" and ts.restrict is None
+    nc = get_enzyme("no-cleavage")
+    assert nc.cleave_at == "$" and nc.default_missed_cleavages == 0
+
+    block = to_sage_enzyme_block(t, missed_cleavages=2, min_len=7, max_len=30)
+    assert block == {
+        "missed_cleavages": 2, "min_len": 7, "max_len": 30,
+        "cleave_at": "KR", "restrict": "P",
+    }
+
+
+def test_enzyme_catalog_rejects_unknown_name():
+    from diaquant.enzymes import get_enzyme
+    with pytest.raises(ValueError):
+        get_enzyme("papain")
+
+
+def test_instrument_preset_applies_only_to_default_fields(tmp_path):
+    import yaml
+    from diaquant.config import DiaQuantConfig
+
+    fasta = tmp_path / "t.fasta"; fasta.write_text(">p\nMKTAYIAK\n")
+    mz = tmp_path / "a.mzML"; mz.write_text("")
+
+    yaml_a = tmp_path / "a.yaml"
+    yaml_a.write_text(yaml.safe_dump({
+        "fasta": str(fasta),
+        "mzml_files": [str(mz)],
+        "output_dir": str(tmp_path / "outa"),
+        "instrument": "orbitrap_astral",
+    }))
+    a = DiaQuantConfig.from_yaml(yaml_a)
+    assert a.precursor_tol_ppm == 3.0
+    assert a.fragment_tol_ppm == 8.0
+    assert a.pred_lib_instrument == "Lumos"
+    assert a.pred_lib_nce == 27.0
+    assert a.min_precursor_mz == 380.0 and a.max_precursor_mz == 980.0
+
+    yaml_b = tmp_path / "b.yaml"
+    yaml_b.write_text(yaml.safe_dump({
+        "fasta": str(fasta),
+        "mzml_files": [str(mz)],
+        "output_dir": str(tmp_path / "outb"),
+        "instrument": "orbitrap_astral",
+        "precursor_tol_ppm": 1.0,
+    }))
+    b = DiaQuantConfig.from_yaml(yaml_b)
+    assert b.precursor_tol_ppm == 1.0
+    assert b.fragment_tol_ppm == 8.0
+
+
+def test_config_rejects_unknown_enzyme(tmp_path):
+    import yaml
+    from diaquant.config import DiaQuantConfig
+
+    fasta = tmp_path / "t.fasta"; fasta.write_text(">p\nMKTAYIAK\n")
+    mz = tmp_path / "a.mzML"; mz.write_text("")
+    yaml_path = tmp_path / "bad.yaml"
+    yaml_path.write_text(yaml.safe_dump({
+        "fasta": str(fasta),
+        "mzml_files": [str(mz)],
+        "output_dir": str(tmp_path / "out"),
+        "enzyme": "papain",
+    }))
+    with pytest.raises(ValueError):
+        DiaQuantConfig.from_yaml(yaml_path)
+
+
+def test_sage_runner_uses_enzyme_catalog(tmp_path):
+    import yaml
+    from diaquant.config import DiaQuantConfig
+    from diaquant.sage_runner import build_sage_config
+
+    fasta = tmp_path / "t.fasta"; fasta.write_text(">p\nMKTAYIAK\n")
+    mz = tmp_path / "a.mzML"; mz.write_text("")
+    yp = tmp_path / "c.yaml"
+    yp.write_text(yaml.safe_dump({
+        "fasta": str(fasta),
+        "mzml_files": [str(mz)],
+        "output_dir": str(tmp_path / "out"),
+        "enzyme": "glu-c",
+        "missed_cleavages": 3,
+    }))
+    cfg = DiaQuantConfig.from_yaml(yp)
+    sage = build_sage_config(cfg)
+    assert sage["database"]["enzyme"]["cleave_at"] == "E"
+    assert sage["database"]["enzyme"]["restrict"] is None
+    assert sage["database"]["enzyme"]["missed_cleavages"] == 3

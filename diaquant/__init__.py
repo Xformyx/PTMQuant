@@ -2,6 +2,8 @@
 
 Modules:
 - config:             parse YAML configuration
+- enzymes:            9-entry protease catalog (NEW in 0.5.1)
+- instruments:        4-entry Orbitrap preset catalog (NEW in 0.5.1)
 - modifications:      UniMod / custom PTM definitions
 - ptm_profiles:       PTM-family-specific Sage search profiles (multi-pass)
 - sage_runner:        build Sage JSON config and invoke the binary
@@ -16,4 +18,4 @@ Modules:
 - cli:                click-based command-line interface
 """
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"

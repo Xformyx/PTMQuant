@@ -24,6 +24,8 @@ import yaml
 
 from . import __version__
 from .config import DiaQuantConfig
+from .enzymes import ENZYME_CATALOG, get_enzyme, list_enzymes
+from .instruments import INSTRUMENT_PRESETS, get_instrument, list_instruments
 from .modifications import DEFAULT_MODIFICATIONS
 from .multipass import run_multipass
 from .parse_sage import attach_fasta_meta, parse_sage_tsv
@@ -61,29 +63,44 @@ def cli() -> None:
 @click.option("--sample-sheet", default=None, type=click.Path(),
               help="Optional TSV with mzml_file & group columns for "
                    "automatic differential analysis.")
+@click.option("--enzyme",
+              type=click.Choice(sorted(ENZYME_CATALOG), case_sensitive=False),
+              default="trypsin", show_default=True,
+              help="Protease used for in-silico digestion. Run `diaquant list-enzymes` for descriptions.")
+@click.option("--instrument",
+              type=click.Choice(sorted(INSTRUMENT_PRESETS), case_sensitive=False),
+              default="exploris_240", show_default=True,
+              help="Orbitrap preset (tolerances, m/z range, NCE, peptdeep tag). "
+                   "Run `diaquant list-instruments` for the full table.")
 def init_config(out: str, fasta: str, mzml_dir: str,
                 passes: List[str], ptms: List[str],
-                sample_sheet: str) -> None:
+                sample_sheet: str,
+                enzyme: str, instrument: str) -> None:
     """Generate a starter YAML configuration."""
     files = sorted(str(p) for p in Path(mzml_dir).glob("*.mzML"))
     if not files:
         raise click.ClickException(f"No .mzML files found in {mzml_dir}")
 
+    preset = get_instrument(instrument)
+    enzyme_rule = get_enzyme(enzyme)
     cfg = {
         "fasta": fasta,
         "mzml_files": files,
         "output_dir": "diaquant_results",
+        # ---- 0.5.1: instrument preset + enzyme catalog ----
+        "instrument": preset.name,
+        "enzyme": enzyme_rule.name,
         "fixed_modifications": ["Carbamidomethyl"],
         "max_variable_mods": 2,
-        "missed_cleavages": 2,
+        "missed_cleavages": enzyme_rule.default_missed_cleavages,
         "min_peptide_length": 7,
         "max_peptide_length": 30,
         "min_precursor_charge": 2,
         "max_precursor_charge": 4,
-        "min_precursor_mz": 400.0,
-        "max_precursor_mz": 1000.0,
-        "precursor_tol_ppm": 6.0,
-        "fragment_tol_ppm": 12.0,
+        "min_precursor_mz": preset.min_precursor_mz,
+        "max_precursor_mz": preset.max_precursor_mz,
+        "precursor_tol_ppm": preset.precursor_tol_ppm,
+        "fragment_tol_ppm": preset.fragment_tol_ppm,
         "psm_fdr": 0.01,
         "site_probability_cutoff": 0.75,
         "match_between_runs": True,
@@ -91,8 +108,8 @@ def init_config(out: str, fasta: str, mzml_dir: str,
         "machine_learning": "nn_cv",
         # ---- 0.5.0: AlphaPeptDeep predicted spectral library ----
         "predicted_library": True,
-        "pred_lib_instrument": "QE",
-        "pred_lib_nce": 27.0,
+        "pred_lib_instrument": preset.pred_lib_instrument,
+        "pred_lib_nce": preset.pred_lib_nce,
         "pred_lib_cache": True,
         "pred_lib_transfer_learning": False,
         "pred_lib_fallback_in_silico": True,
@@ -123,6 +140,31 @@ def init_config(out: str, fasta: str, mzml_dir: str,
         click.echo(f"  Passes enabled: {list(passes)}")
     else:
         click.echo(f"  Single-pass variable mods: {cfg['variable_modifications']}")
+
+
+@cli.command("list-enzymes")
+def list_enzymes_cmd() -> None:
+    """List supported proteases with Sage cleavage rules (0.5.1+)."""
+    for name, rule in list_enzymes().items():
+        click.secho(f"- {name}", fg="green", bold=True)
+        click.echo(f"    {rule.description}")
+        click.echo(
+            f"    cleave_at={rule.cleave_at!r}  restrict={rule.restrict!r}  "
+            f"default_missed_cleavages={rule.default_missed_cleavages}"
+        )
+
+
+@cli.command("list-instruments")
+def list_instruments_cmd() -> None:
+    """List supported Orbitrap presets and their default tolerances (0.5.1+)."""
+    for name, p in list_instruments().items():
+        click.secho(f"- {name}", fg="green", bold=True)
+        click.echo(f"    {p.display_name} -- {p.description}")
+        click.echo(
+            f"    MS1/MS2 id = {p.precursor_tol_ppm}/{p.fragment_tol_ppm} ppm  |  "
+            f"m/z {p.min_precursor_mz:.0f}\u2013{p.max_precursor_mz:.0f}  |  "
+            f"NCE={p.pred_lib_nce}  |  peptdeep='{p.pred_lib_instrument}'"
+        )
 
 
 @cli.command("list-passes")

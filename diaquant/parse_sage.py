@@ -44,8 +44,14 @@ def _strip_mods(seq: str) -> str:
 
 def parse_sage_tsv(path: Path,
                    site_cutoff: float = 0.75,
-                   peptide_fdr: float = 0.01) -> pd.DataFrame:
-    """Read Sage results, add DIA-NN-style columns and PTM site probabilities."""
+                   peptide_fdr: float = 0.01,
+                   return_unfiltered: bool = False):
+    """Read Sage results, add DIA-NN-style columns and PTM site probabilities.
+
+    When ``return_unfiltered`` is True returns ``(df_filtered, df_full)`` where
+    ``df_full`` carries the same column set but includes every PSM (pre-FDR).
+    The unfiltered table is the donor pool for :mod:`diaquant.mbr`.
+    """
     df = pd.read_csv(path, sep="\t", low_memory=False)
     # Force all object-like columns to native Python dtypes so string
     # operations work regardless of whether pandas uses Arrow or numpy backing.
@@ -76,6 +82,9 @@ def parse_sage_tsv(path: Path,
     df["Precursor.Id"] = (df["Modified.Sequence"].astype(str)
                           + df["Precursor.Charge"].astype(str))
 
+    # keep a copy of the pre-FDR table for MBR (v0.5.5 donor pool)
+    df_full = df.copy()
+
     # filter: target hits at configured peptide FDR
     if "Peptide.Q.Value" in df.columns:
         before = len(df)
@@ -85,19 +94,24 @@ def parse_sage_tsv(path: Path,
             "FDR filter (peptide_q \u2264 %.3f): %d \u2192 %d PSMs", peptide_fdr, before, len(df)
         )
 
-    # PTM site localization
+    # PTM site localization (v0.5.5: per-mod PTM.Mods + per-site probabilities)
     df = add_site_probabilities(df.rename(columns={"Modified.Sequence": "peptide",
                                                    "Precursor.Charge": "charge"}),
                                 cutoff=site_cutoff)
     df = df.rename(columns={"peptide": "Modified.Sequence",
                             "charge": "Precursor.Charge"})
-
-    # short-hand Modification name = first mod found in the sequence (or 'none')
-    def first_mod(seq: str) -> str:
-        m = MOD_RE.search(seq)
-        return m.group(0).strip("[]()") if m else "none"
-    df["PTM.Modification"] = df["Modified.Sequence"].map(first_mod)
-
+    # ``PTM.Modification`` is now written by add_site_probabilities (first
+    # mod encountered in the peptide).  We no longer recompute it here.
+    if return_unfiltered:
+        # Run the same localization pass on the donor pool so its Modified.Sequence
+        # column matches (MBR keys off Modified.Sequence + Precursor.Charge).
+        df_full = add_site_probabilities(
+            df_full.rename(columns={"Modified.Sequence": "peptide",
+                                    "Precursor.Charge": "charge"}),
+            cutoff=0.0)
+        df_full = df_full.rename(columns={"peptide": "Modified.Sequence",
+                                          "charge": "Precursor.Charge"})
+        return df, df_full
     return df
 
 

@@ -90,6 +90,7 @@ def write_run_manifest(
     n_psms_raw: Optional[int] = None,
     n_psms_rescored: Optional[int] = None,
     n_psms_after_fdr: Optional[int] = None,
+    n_psms_mbr: Optional[int] = None,
     pr_rows: Optional[int] = None,
     pg_rows: Optional[int] = None,
     site_rows: Optional[int] = None,
@@ -141,9 +142,29 @@ def write_run_manifest(
             logger.warning("failed to copy config.yaml: %s", exc)
 
     # ---- mirror predicted libraries ----
-    lib_entries = _copy_predicted_libraries(
-        cfg, out_dir, library_paths or []
-    )
+    # v0.5.5: if the caller did not explicitly thread paths through, look for
+    # predicted_library_*.tsv next to the output dir (pass_phospho/, etc.) and
+    # in the configured cache dir; this makes multi-pass outputs observable.
+    paths: List[Path] = [Path(p) for p in (library_paths or []) if p]
+    # Only auto-discover when the caller did not pass a library_paths argument
+    # at all (None).  An explicit empty list means "we already checked, zero
+    # libraries were produced" and must be respected.
+    if library_paths is None and not paths:
+        search_roots = [out_dir, out_dir.parent]
+        cache_dir = getattr(cfg, "pred_lib_cache_dir", None)
+        if cache_dir:
+            search_roots.append(Path(cache_dir))
+        seen: set = set()
+        for root in search_roots:
+            if not root or not Path(root).exists():
+                continue
+            for p in Path(root).rglob("predicted_library_*.tsv"):
+                resolved = p.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                paths.append(p)
+    lib_entries = _copy_predicted_libraries(cfg, out_dir, paths)
 
     predicted_library_applied = (
         getattr(cfg, "predicted_library", False)
@@ -177,6 +198,10 @@ def write_run_manifest(
             "n_psms_raw": n_psms_raw,
             "n_psms_rescored": n_psms_rescored,
             "n_psms_after_fdr": n_psms_after_fdr,
+        },
+        "mbr": {
+            "enabled_in_config": bool(getattr(cfg, "match_between_runs", False)),
+            "n_psms_rescued": int(n_psms_mbr) if n_psms_mbr is not None else 0,
         },
         "matrices": {
             "pr_matrix_rows": pr_rows,

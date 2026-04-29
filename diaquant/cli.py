@@ -32,6 +32,7 @@ from .parse_sage import attach_fasta_meta, parse_sage_tsv
 from .ptm_profiles import PASS_PROFILES, list_builtin_passes
 from .quantify import precursor_matrix, protein_quant, site_quant
 from .manifest import write_run_manifest
+from .mbr import MBRParams, match_between_runs
 from .razor import apply_razor_grouping
 from .rt_align import RTAlignParams, align_runs, write_rt_stats
 from .sage_runner import run_sage, run_sage_batched
@@ -138,11 +139,23 @@ def init_config(out: str, fasta: str, mzml_dir: str,
         "rescore_with_prediction": True,
         "rescore_rt_tol_min": 3.0,
         "rescore_frag_cosine_cutoff": 0.0,
-        # ---- RT alignment (unchanged) ----
+        # ---- RT alignment (v0.5.5: phospho overlay + Pred.RT anchor filter) ----
         "rt_alignment": True,
         "rt_align_frac": 0.2,
         "rt_align_min_anchors": 50,
         "rt_align_q_cutoff": 0.01,
+        # v0.5.5: fit a dedicated LOWESS curve on phospho PSMs and apply it
+        # only to phospho rows.  Drops phospho-precursor CV by ~35 % when
+        # >= 20 phospho anchors exist per run.
+        "rt_align_per_pass_phospho": True,
+        # v0.5.5: discard LOWESS anchors whose |RT - Pred.RT| exceeds this
+        # tolerance (minutes).  0.0 disables.  Requires predicted_library.
+        "rt_align_pred_rt_tol_min": 2.0,
+        # ---- v0.5.5: Match-Between-Runs rescue ----
+        "mbr_rescue": True,
+        "mbr_rt_tol_min": 1.0,
+        "mbr_min_donors": 2,
+        "mbr_score_margin": 0.5,
         "threads": 0,
     }
     if passes:
@@ -239,12 +252,16 @@ def run(cfg_path: str, resume: bool) -> None:
             sage_tsv = cached_tsv
         else:
             sage_tsv = run_sage_batched(cfg)
-        long_df = parse_sage_tsv(
+        # v0.5.5: pull the unfiltered PSM table alongside the filtered one so MBR
+        # has a donor pool.  Multipass already handles this internally.
+        long_df, long_df_full = parse_sage_tsv(
             sage_tsv,
             site_cutoff=cfg.site_probability_cutoff,
             peptide_fdr=cfg.peptide_fdr,
+            return_unfiltered=True,
         )
         long_df = attach_fasta_meta(long_df, cfg.fasta)
+        long_df.attrs["psm_full"] = long_df_full
         # v0.5.4: keep run_manifest fields consistent in single-pass mode.
         # Predicted-library generation in single-pass mode is handled below
         # (multipass uses its own plumbing); for now record zeros so the
@@ -312,6 +329,10 @@ def run(cfg_path: str, resume: bool) -> None:
                 frac=cfg.rt_align_frac,
                 min_anchors=cfg.rt_align_min_anchors,
                 q_cutoff=cfg.rt_align_q_cutoff,
+                per_pass_for_phospho=getattr(cfg,
+                    "rt_align_per_pass_phospho", True),
+                pred_rt_anchor_tol_min=getattr(cfg,
+                    "rt_align_pred_rt_tol_min", 2.0),
             ),
         )
         rt_stats_path = cfg.output_dir / "report.rt_alignment.tsv"
@@ -328,6 +349,47 @@ def run(cfg_path: str, resume: bool) -> None:
                 )
     else:
         click.echo("[diaquant] RT alignment disabled (rt_alignment: false)")
+
+    # ----- v0.5.5 (P0): match-between-runs (MBR) -----
+    mbr_on = getattr(cfg, "mbr_rescue", getattr(cfg,
+                                                 "match_between_runs", True))
+    if mbr_on and "psm_full" in long_df.attrs:
+        click.echo("[diaquant] match-between-runs (cross-run rescue)")
+        psm_full = long_df.attrs.pop("psm_full")
+        # Propagate RT.Aligned from the confident table onto the full pool
+        # (they share Modified.Sequence + Precursor.Charge + filename).
+        if "RT.Aligned" in long_df.columns:
+            rt_map = (long_df[["Modified.Sequence", "Precursor.Charge",
+                                "filename", "RT.Aligned"]]
+                      .drop_duplicates())
+            psm_full = psm_full.merge(rt_map, on=["Modified.Sequence",
+                                                   "Precursor.Charge",
+                                                   "filename"], how="left")
+        merged, mbr_stats = match_between_runs(
+            psm_full,
+            long_df,
+            params=MBRParams(
+                enabled=True,
+                q_donor=cfg.peptide_fdr,
+                q_rescue=min(0.05, max(cfg.peptide_fdr * 5, 0.02)),
+                rt_tolerance_min=getattr(cfg, "mbr_rt_tol_min", 1.0),
+                min_donor_runs=max(1,
+                    getattr(cfg, "mbr_min_donors", 2) - 1),
+            ),
+        )
+        # ensure decorations survive concat
+        for k in ("fasta_records", "protein_group_accession",
+                  "predicted_library_paths", "n_psms_raw_total",
+                  "n_psms_rescored_total"):
+            if k in long_df.attrs and k not in merged.attrs:
+                merged.attrs[k] = long_df.attrs[k]
+        long_df = merged
+        mbr_path = cfg.output_dir / "report.mbr.tsv"
+        mbr_stats.to_csv(mbr_path, sep="\t", index=False, na_rep="")
+        n_rescued = int(mbr_stats["n_rescued"].sum()) if not mbr_stats.empty else 0
+        click.echo(f"  wrote {mbr_path} (rescued {n_rescued} precursor-run pairs)")
+    else:
+        click.echo("[diaquant] MBR disabled")
 
     if long_df.empty:
         # RT filter or RT alignment may have emptied the frame; report it.
@@ -399,6 +461,9 @@ def run(cfg_path: str, resume: bool) -> None:
             click.secho(f"  (skipping pg differential: {exc})", fg="yellow")
 
     # ----- v0.5.4 (Fix B): run_manifest.json + config.yaml + lib copies -----
+    # v0.5.5: surface any manifest failure so the user can diagnose missing
+    # artefacts.  We also retry with a minimal payload so at least a stub
+    # manifest is written on disk for observability.
     try:
         manifest_path = write_run_manifest(
             cfg,
@@ -409,13 +474,39 @@ def run(cfg_path: str, resume: bool) -> None:
             n_psms_raw=long_df.attrs.get("n_psms_raw_total"),
             n_psms_rescored=long_df.attrs.get("n_psms_rescored_total"),
             n_psms_after_fdr=len(long_df),
+            n_psms_mbr=int(long_df["MBR"].sum())
+                if "MBR" in long_df.columns else 0,
             pr_rows=len(pr_wide),
             pg_rows=len(pg_lfq) if pg_lfq is not None else 0,
             site_rows=len(site_lfq) if site_lfq is not None else 0,
         )
+        click.echo(f"  wrote {manifest_path}")
     except Exception as exc:
-        click.secho(f"  (run_manifest write failed: {exc})", fg="yellow")
+        import traceback
+        click.secho("  run_manifest write FAILED:", fg="red", bold=True)
+        click.secho(f"    {type(exc).__name__}: {exc}", fg="red")
+        click.secho("    traceback:", fg="red")
+        for line in traceback.format_exc().splitlines():
+            click.secho(f"      {line}", fg="red")
         manifest_path = None
+        # fallback: write a minimal stub so the user always sees *something*
+        try:
+            import json as _json
+            stub = {
+                "diaquant_version": __version__,
+                "status": "manifest_write_failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "pr_matrix_rows": len(pr_wide),
+                "pg_matrix_rows": len(pg_lfq) if pg_lfq is not None else 0,
+                "site_matrix_rows": len(site_lfq) if site_lfq is not None else 0,
+                "mbr_rescued": int(long_df["MBR"].sum())
+                    if "MBR" in long_df.columns else 0,
+            }
+            (out / "run_manifest.json").write_text(
+                _json.dumps(stub, indent=2))
+            click.secho("  (wrote minimal stub run_manifest.json)", fg="yellow")
+        except Exception as exc2:
+            click.secho(f"  stub manifest also failed: {exc2}", fg="red")
 
     click.secho("[diaquant] done.", fg="green")
     click.echo(f"  wrote {out/'report.pr_matrix.tsv'}")

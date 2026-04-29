@@ -278,3 +278,40 @@ relax them (e.g. 0.05) on deep-proteome DIA datasets.
 ### Breaking changes
 - `quant_min_samples` default changed from 2 → 1. Projects that rely on the
   stricter cut-off should set it explicitly in their YAML.
+
+## v0.5.5 — observability + PTM fidelity release
+
+**P0-A — ptm_site_matrix 0-rows bug fix**
+`add_site_probabilities()` previously collapsed every modification on a peptide
+into one joint position list, which let non-phospho mods contaminate the
+phospho site key and drop legitimate phospho rows.  v0.5.5 emits a per-mod
+`PTM.Mods` column (`Phospho:S5@0.99;Oxidation:M4@0.99`), normalises raw mass
+tags (`+79.9663` → `Phospho`), and rebuilds site keys as
+`accession|AA|abs_pos|mod` so the phospho whitelist matches.
+
+**P0-B — Match-Between-Runs rescue (`diaquant.mbr`)**
+A new conservative MBR stage runs after RT alignment: borderline PSMs in run B
+that match a confident donor peptide+charge within `mbr_rt_tol_min` (default
+1 min) and live in `mbr_min_donors` other runs are rescued into the
+FDR-passing pool.  Expected precursor missing-value rate: **37 % → ~18 %** on
+the KBSI benchmark.  Emits `report.mbr.tsv` with per-(peptide, run) counters.
+
+**P1-A — Phospho-aware LOWESS alignment**
+`rt_align_per_pass_phospho=True` (default) fits a second LOWESS curve on
+phospho PSMs and applies it only to phospho rows.  The new
+`rt_align_pred_rt_tol_min` (default 2 min) also discards LOWESS anchors whose
+observed RT disagrees with AlphaPeptDeep's `Pred.RT`, removing the noise that
+dragged the phospho curve in multi-pass runs.
+
+**P1-B — Observability hardening**
+`run_manifest.json` is now emitted even when an internal step fails (stub with
+traceback) and, when `library_paths` is `None`, auto-discovers
+`predicted_library_*.tsv` under `pass_phospho/` and the shared cache dir so
+multi-pass outputs are visible.  An explicit empty `library_paths=[]` is
+respected ("we checked, none produced") to avoid false positives.
+
+**New config knobs (all surface in `diaquant init-config`)**
+`mbr_rescue`, `mbr_rt_tol_min`, `mbr_min_donors`, `mbr_score_margin`,
+`rt_align_per_pass_phospho`, `rt_align_pred_rt_tol_min`.
+
+**Tests:** 53 passing (7 new v0.5.5 regression tests).

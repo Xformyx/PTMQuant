@@ -99,6 +99,8 @@ def run_multipass(base: DiaQuantConfig, resume: bool = False) -> Tuple[pd.DataFr
     )
 
     per_pass: Dict[str, pd.DataFrame] = {}
+    # v0.5.5: also keep the pre-FDR PSM table per pass, for MBR donor pooling.
+    per_pass_full: Dict[str, pd.DataFrame] = {}
     # v0.5.4: remember every predicted-library TSV we generated/reused so the
     # caller (cli.run) can drop copies into out_dir for user-side verification.
     library_paths: List[Path] = []
@@ -144,10 +146,13 @@ def run_multipass(base: DiaQuantConfig, resume: bool = False) -> Tuple[pd.DataFr
         else:
             sage_tsv = run_sage_batched(pass_cfg)
 
-        df = parse_sage_tsv(sage_tsv,
-                            site_cutoff=pass_cfg.site_probability_cutoff,
-                            peptide_fdr=pass_cfg.peptide_fdr)
+        df, df_full = parse_sage_tsv(sage_tsv,
+                                     site_cutoff=pass_cfg.site_probability_cutoff,
+                                     peptide_fdr=pass_cfg.peptide_fdr,
+                                     return_unfiltered=True)
         df = attach_fasta_meta(df, pass_cfg.fasta)
+        df_full = _annotate_pass(df_full, profile)
+        per_pass_full[profile.name] = df_full
         n_psms_raw_total += len(df)
 
         # ---- 0.5.0: post-hoc rescoring with AlphaPeptDeep RT prediction ----
@@ -200,4 +205,8 @@ def run_multipass(base: DiaQuantConfig, resume: bool = False) -> Tuple[pd.DataFr
     merged.attrs["predicted_library_paths"] = library_paths
     merged.attrs["n_psms_raw_total"] = n_psms_raw_total
     merged.attrs["n_psms_rescored_total"] = n_psms_rescored_total
+    if per_pass_full:
+        merged.attrs["psm_full"] = pd.concat(
+            per_pass_full.values(), ignore_index=True, sort=False,
+        )
     return merged, per_pass

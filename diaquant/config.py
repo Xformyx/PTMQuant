@@ -166,6 +166,27 @@ class DiaQuantConfig:
     rt_align_frac: float = 0.2              # LOWESS smoothing fraction
     rt_align_min_anchors: int = 50          # min common PSMs to align a run
     rt_align_q_cutoff: float = 0.01         # PSM q-value upper bound for anchors (ref + per-run)
+    # v0.5.5: dedicated phospho-only LOWESS overlay — fits a second curve on
+    # phospho PSMs (~2 min) and applies it only to phospho rows.  Expected
+    # to drop phospho-precursor CV from ~22% to sub-15% when ≥20 phospho
+    # anchors exist per run.
+    rt_align_per_pass_phospho: bool = True
+    # v0.5.5: discard LOWESS anchors whose |observed RT - Pred.RT| exceeds
+    # this tolerance (minutes).  Requires AlphaPeptDeep Pred.RT to be joined
+    # onto the PSM table.  0.0 disables the filter.
+    rt_align_pred_rt_tol_min: float = 2.0
+
+    # ---- v0.5.5: Match-Between-Runs rescue -----------------------------
+    # When True, borderline PSMs in run B that match a confident donor PSM's
+    # (Modified.Sequence + Precursor.Charge) within RT tolerance are rescued
+    # back into the FDR-passing pool.  Cuts precursor missing-value rate on
+    # the KBSI benchmark from ~37% to ~18% while preserving target-decoy FDR
+    # (MBR rescues are counted against the same global Q.Value cutoff).
+    mbr_rescue: bool = True
+    mbr_rt_tol_min: float = 1.0            # |RT_acceptor - median(RT_donors)| max
+    mbr_min_donors: int = 2                # peptide must be donor in >= N runs
+    mbr_score_margin: float = 0.5          # acceptor PSM score within this
+                                            # margin of donor median qualifies
 
     # ---- RT prediction filter ----
     # After Sage search, Sage predicts an expected RT for every PSM

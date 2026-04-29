@@ -561,7 +561,8 @@ def test_site_matrix_uses_absolute_position(tmp_path):
     site_lfq = site_quant(long_df, min_samples=1,
                           localization_cutoff=0.75)
     assert not site_lfq.empty
-    assert site_lfq["protein"].iloc[0] == "P1|TEST|S6|+79.9663"
+    # v0.5.5: mod name normalised to human-readable ("+79.9663" → "Phospho").
+    assert site_lfq["protein"].iloc[0] == "P1|TEST|S6|Phospho"
 
     out = tmp_path / "site.tsv"
     write_site_matrix(site_lfq, out)
@@ -570,6 +571,7 @@ def test_site_matrix_uses_absolute_position(tmp_path):
                 "PTM.Modification"]) <= set(df.columns)
     assert df["Protein.Group"].iloc[0] == "P1"
     assert df["PTM.Site"].iloc[0] == "S6"
+    assert df["PTM.Modification"].iloc[0] == "Phospho"
 
 
 def test_site_matrix_localization_filter_drops_low_loc():
@@ -676,7 +678,7 @@ def test_site_quant_translates_protein_group_to_accession():
     )
     # _abs_site_keys uses the *accession* as the first key field.
     key = site_lfq["protein"].iloc[0]
-    assert key.startswith("P1|TEST|S6|"), key
+    assert key.startswith("P1|TEST|S6|Phospho"), key
     assert "_local" not in key, "Should resolve to absolute position, not _local fallback"
 
 
@@ -686,7 +688,10 @@ def test_site_quant_translates_protein_group_to_accession():
 
 def test_version_bumped_to_054():
     import diaquant
-    assert diaquant.__version__.startswith("0.5.4"), diaquant.__version__
+    # renamed to 'v0.5.4+ or newer'; keep test name for traceability.
+    v = diaquant.__version__
+    major, minor = v.split(".")[:2]
+    assert (int(major), int(minor)) >= (0, 5), v
 
 
 def test_razor_assigns_unique_peptide_to_sole_parent():
@@ -809,3 +814,139 @@ def test_quant_min_samples_default_is_one():
     )
     assert cfg.quant_min_samples == 1
     assert cfg.min_peptides_per_protein == 1
+
+
+# =====================================================================
+# v0.5.5 regression tests
+# =====================================================================
+
+def test_version_is_055():
+    import diaquant
+    assert diaquant.__version__ == "0.5.5"
+
+
+def test_mbr_config_defaults():
+    """MBR is on by default; knobs exist for tolerance and donor count."""
+    from diaquant.config import DiaQuantConfig
+    from pathlib import Path
+    cfg = DiaQuantConfig(
+        fasta=Path("/tmp/x.fasta"),
+        mzml_files=[Path("/tmp/a.mzML")],
+        output_dir=Path("/tmp/out"),
+    )
+    assert cfg.mbr_rescue is True
+    assert cfg.mbr_rt_tol_min == 1.0
+    assert cfg.mbr_min_donors == 2
+    # Backward compatibility: the legacy ``match_between_runs`` field stays.
+    assert cfg.match_between_runs is True
+
+
+def test_rt_align_phospho_overlay_defaults():
+    """Phospho-aware LOWESS overlay + Pred.RT anchor filter are default-on."""
+    from diaquant.config import DiaQuantConfig
+    from pathlib import Path
+    cfg = DiaQuantConfig(
+        fasta=Path("/tmp/x.fasta"),
+        mzml_files=[Path("/tmp/a.mzML")],
+        output_dir=Path("/tmp/out"),
+    )
+    assert cfg.rt_align_per_pass_phospho is True
+    assert cfg.rt_align_pred_rt_tol_min == 2.0
+
+
+def test_add_site_probabilities_emits_ptm_mods_per_mod():
+    """v0.5.5: PTM.Mods splits sites per modification so phospho whitelist
+    filtering doesn't conflate oxidation + phospho."""
+    import pandas as pd
+    from diaquant.ptm_localization import add_site_probabilities
+    df = pd.DataFrame({
+        "filename":          ["a.mzML", "a.mzML"],
+        "peptide":           [
+            "AAAM[+15.9949]S[+79.9663]STK",
+            "PEPTIDES[+79.9663]K",
+        ],
+        "Modified.Sequence": [
+            "AAAM[+15.9949]S[+79.9663]STK",
+            "PEPTIDES[+79.9663]K",
+        ],
+        "Stripped.Sequence": ["AAAMSSTK", "PEPTIDESK"],
+        "Precursor.Charge":  [2, 2],
+        "charge":             [2, 2],
+        "Score":             [15.0, 12.0],
+    })
+    out = add_site_probabilities(df)
+    assert "PTM.Mods" in out.columns, "v0.5.5 must emit PTM.Mods"
+    # First row must carry Phospho, and phospho positions must NOT include M.
+    mods_row0 = out.loc[0, "PTM.Mods"]
+    s0 = str(mods_row0)
+    assert "Phospho" in s0, f"PTM.Mods row0 missing Phospho: {mods_row0!r}"
+    # Phospho sites (serialised as 'S5@0.xx' etc.) should sit on S/T/Y.
+    import re
+    phospho_chunk = re.search(r"Phospho:([^;]*)", s0)
+    if phospho_chunk:
+        for site in phospho_chunk.group(1).split(","):
+            aa = site.strip()[:1]
+            assert aa in "STY", (
+                f"Phospho site should be on STY, got {site!r}"
+            )
+
+
+def test_normalise_mass_tag_to_phospho():
+    """v0.5.5: raw +79.9663 mass tags are normalised to 'Phospho' so the
+    site_quant whitelist matches."""
+    from diaquant.ptm_localization import _normalise_tag
+    assert _normalise_tag("+79.9663") == "Phospho"
+    assert _normalise_tag("+79.96633") == "Phospho"
+    assert _normalise_tag("Phospho") == "Phospho"
+    # Unknown tags pass through unchanged.
+    assert _normalise_tag("SomeCustomPTM") == "SomeCustomPTM"
+
+
+def test_manifest_autodiscovers_predicted_libraries(tmp_path):
+    """v0.5.5: when library_paths=None, manifest scans out_dir for
+    predicted_library_*.tsv including pass subdirs."""
+    from diaquant.manifest import write_run_manifest
+    from diaquant.config import DiaQuantConfig
+    import json
+    # Simulate a multi-pass output tree
+    (tmp_path / "pass_phospho").mkdir()
+    (tmp_path / "pass_phospho" / "predicted_library_abc.tsv").write_text("x")
+    cfg = DiaQuantConfig(
+        fasta=tmp_path / "x.fasta",
+        mzml_files=[tmp_path / "a.mzML"],
+        output_dir=tmp_path,
+        predicted_library=True,
+        rescore_with_prediction=True,
+    )
+    # library_paths=None triggers auto-discovery
+    out = write_run_manifest(
+        cfg, tmp_path, diaquant_version="0.5.5",
+        config_yaml_src=None, library_paths=None,
+    )
+    data = json.loads(out.read_text())
+    assert data["predicted_library"]["enabled_in_config"] is True
+    assert data["predicted_library"]["applied"] is True, (
+        "Expected auto-discovery to pick up pass_phospho/predicted_library_*.tsv"
+    )
+
+
+def test_manifest_respects_explicit_empty_library_list(tmp_path):
+    """v0.5.5: explicit empty list means 'we checked, none produced',
+    so manifest must NOT auto-discover stray files elsewhere."""
+    from diaquant.manifest import write_run_manifest
+    from diaquant.config import DiaQuantConfig
+    import json
+    (tmp_path / "predicted_library_zombie.tsv").write_text("x")
+    cfg = DiaQuantConfig(
+        fasta=tmp_path / "x.fasta",
+        mzml_files=[tmp_path / "a.mzML"],
+        output_dir=tmp_path,
+        predicted_library=True,
+        rescore_with_prediction=True,
+    )
+    out = write_run_manifest(
+        cfg, tmp_path, diaquant_version="0.5.5",
+        config_yaml_src=None, library_paths=[],  # explicit empty
+    )
+    data = json.loads(out.read_text())
+    assert data["predicted_library"]["applied"] is False

@@ -219,3 +219,14 @@ Future versions will expand the AlphaPeptDeep integration to replace the softmax
 ## Licence
 
 Apache-2.0. See `LICENSE`.
+
+
+## What's new in v0.5.3
+
+Three changes, all focused on making the AlphaPeptDeep predicted library a practical production feature rather than an opt-in experiment.
+
+1. **Shared predicted-library cache (`pred_lib_cache_dir`).** AlphaPeptDeep prediction is deterministic for a fixed (FASTA contents, enzyme, missed cleavages, peptide-length range, precursor charge and m/z range, PTM set, instrument, NCE, model version) tuple. v0.5.3 hashes that tuple into a stable 16-character key and checks a cross-job cache directory before running the prediction. Set `pred_lib_cache_dir: /path/to/cache` in the YAML or `export PTMQUANT_LIB_CACHE_DIR=/path` and every job with matching parameters reuses the cached `predicted_library_<hash>.tsv` along with a sibling `.meta.json` describing the contents. On the PTM platform the api-server bind-mounts `./storage/predicted_lib_cache` into the ptmquant container at `/cache/predicted_libs` so the entire platform shares one cache.
+2. **Phospho localization-probability filter (`site_probability_cutoff`, `include_low_loc_sites`).** `report.ptm_site_matrix.tsv` now carries a `Best.Site.Probability` column and rows below the cutoff (default `0.75`, matching PhosphoRS / SpectroMine) are dropped unless `include_low_loc_sites: true` is set. The cutoff applies to every PTM type, not just phospho.
+3. **`ptm_site_matrix` bug fix (absolute positions + protein metadata).** Previously the site key was `mod_mass + peptide-local position`, which collapsed unrelated sites onto the same row and left Genes / Protein.Group blank. v0.5.3 keys sites on `(accession, residue_AA, absolute_protein_pos, mod_name)` using the FASTA to translate peptide-local positions, populates `Protein.Group`, `Genes`, `PTM.Site` (e.g. `S-240`) and `PTM.Name` columns, and emits one row per distinct protein site. Existing downstream consumers reading by `PTM.Site` continue to work.
+
+The new `pred_lib_cache_dir`, `site_probability_cutoff` and `include_low_loc_sites` keys are emitted by `diaquant init-config`; all three have safe defaults so 0.5.2 YAMLs continue to run unchanged.

@@ -103,6 +103,7 @@ def init_config(out: str, fasta: str, mzml_dir: str,
         "fragment_tol_ppm": preset.fragment_tol_ppm,
         "psm_fdr": 0.01,
         "site_probability_cutoff": 0.75,
+        "include_low_loc_sites": False,
         "match_between_runs": True,
         "scoring_mode": "peptidoforms",
         "machine_learning": "nn_cv",
@@ -111,6 +112,13 @@ def init_config(out: str, fasta: str, mzml_dir: str,
         "pred_lib_instrument": preset.pred_lib_instrument,
         "pred_lib_nce": preset.pred_lib_nce,
         "pred_lib_cache": True,
+        # When a shared cache directory is mounted (e.g. by the PTM-platform
+        # docker-compose under /data/predicted_lib_cache) set this to the same
+        # path so predicted libraries are shared across jobs with matching
+        # FASTA + PTM + instrument + enzyme + m/z range.  Leave null to keep
+        # the per-job local cache only.  The environment variable
+        # PTMQUANT_LIB_CACHE_DIR overrides this when set.
+        "pred_lib_cache_dir": None,
         "pred_lib_transfer_learning": False,
         "pred_lib_fallback_in_silico": True,
         "rescore_with_prediction": True,
@@ -323,7 +331,12 @@ def run(cfg_path: str, resume: bool) -> None:
 
     pr_wide = precursor_matrix(long_df)
     pg_lfq = protein_quant(long_df, min_samples=cfg.quant_min_samples)
-    site_lfq = site_quant(long_df, min_samples=cfg.quant_min_samples)
+    site_lfq = site_quant(
+        long_df,
+        min_samples=cfg.quant_min_samples,
+        localization_cutoff=cfg.site_probability_cutoff,
+        include_low_loc=getattr(cfg, "include_low_loc_sites", False),
+    )
 
     out = cfg.output_dir
     write_pr_matrix(pr_wide, out / "report.pr_matrix.tsv")

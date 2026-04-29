@@ -77,6 +77,11 @@ class DiaQuantConfig:
     peptide_fdr: float = 0.01
     protein_fdr: float = 0.01
     site_probability_cutoff: float = 0.75
+    # v0.5.3: when True, keep PTM sites below ``site_probability_cutoff`` in
+    # ``report.ptm_site_matrix.tsv`` (downstream tools can filter on the
+    # per-row ``Best.Site.Probability`` column).  Default False matches the
+    # recommended phospho workflow where low-localization sites are dropped.
+    include_low_loc_sites: bool = False
     scoring_mode: str = "peptidoforms"      # 'peptidoforms' | 'standard'  (DIA-NN: Scoring)
 
     # ---- quantification (DIA-NN: "QuantUMS", "MBR") ----
@@ -115,6 +120,18 @@ class DiaQuantConfig:
                                               # on disk and skip re-prediction
                                               # on subsequent runs with the
                                               # same FASTA + pass parameters.
+    pred_lib_cache_dir: Optional[Path] = None # shared cross-job cache for
+                                              # predicted libraries.  When set
+                                              # (or when the env variable
+                                              # ``PTMQUANT_LIB_CACHE_DIR`` is
+                                              # set), libraries are cached at
+                                              # ``<dir>/<hash>.tsv`` keyed by
+                                              # FASTA + pass + model params.
+                                              # The PTM-platform container sets
+                                              # this to a bind-mounted volume
+                                              # so every job of every user re-
+                                              # uses the same predicted library
+                                              # when the inputs match.
     pred_lib_transfer_learning: bool = False  # opt-in: after pass 1, fine-tune
                                               # RT/MS2 on the user's own
                                               # high-confidence PSMs before
@@ -124,7 +141,7 @@ class DiaQuantConfig:
                                               # fails, fall back to Sage's
                                               # built-in theoretical library
                                               # rather than aborting the run.
-    # ---- Post-hoc PSM rescoring (NEW in 0.5.0) ----
+    # ---- Post-hoc PSM rescoring (0.5.0, default-ON since 0.5.3) ----
     rescore_with_prediction: bool = True      # use the predicted library to
                                               # add pred_rt_delta and
                                               # frag_cosine features to every
@@ -199,5 +216,17 @@ class DiaQuantConfig:
                 raise FileNotFoundError(
                     f"sample_sheet not found: {cfg.sample_sheet}"
                 )
+        # Resolve the shared predicted-library cache directory: user YAML wins
+        # over the ``PTMQUANT_LIB_CACHE_DIR`` environment variable, which wins
+        # over the per-pass local cache (``out_dir/predicted_library_*.tsv``).
+        import os
+        if cfg.pred_lib_cache_dir is None:
+            env_dir = os.environ.get("PTMQUANT_LIB_CACHE_DIR", "").strip()
+            if env_dir:
+                cfg.pred_lib_cache_dir = Path(env_dir)
+        if cfg.pred_lib_cache_dir is not None and not isinstance(
+            cfg.pred_lib_cache_dir, Path
+        ):
+            cfg.pred_lib_cache_dir = Path(cfg.pred_lib_cache_dir)
         cfg.output_dir.mkdir(parents=True, exist_ok=True)
         return cfg

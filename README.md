@@ -230,3 +230,51 @@ Three changes, all focused on making the AlphaPeptDeep predicted library a pract
 3. **`ptm_site_matrix` bug fix (absolute positions + protein metadata).** Previously the site key was `mod_mass + peptide-local position`, which collapsed unrelated sites onto the same row and left Genes / Protein.Group blank. v0.5.3 keys sites on `(accession, residue_AA, absolute_protein_pos, mod_name)` using the FASTA to translate peptide-local positions, populates `Protein.Group`, `Genes`, `PTM.Site` (e.g. `S-240`) and `PTM.Name` columns, and emits one row per distinct protein site. Existing downstream consumers reading by `PTM.Site` continue to work.
 
 The new `pred_lib_cache_dir`, `site_probability_cutoff` and `include_low_loc_sites` keys are emitted by `diaquant init-config`; all three have safe defaults so 0.5.2 YAMLs continue to run unchanged.
+
+## v0.5.4 (2026-04) — the 3× ID-gap fix
+
+This release closes the ~3× precursor/peptide/protein ID gap seen between
+PTMQuant (diaquant 0.5.3.1) and DIA-NN on the same DIA mzML. Four changes
+work together:
+
+**A. pg_quant filter relaxed to DIA-NN equivalent.** The default
+`quant_min_samples` is now **1** (was 2), and a new
+`min_peptides_per_protein` knob (default 1) lets you dial protein-group
+stringency independently. On the KBSI benchmark this alone recovers the
+1,519 proteins that were previously lost between `pr_matrix` (3,527
+accessions) and `pg_matrix` (2,008 rows).
+
+**B. Observability.** Every run now writes `run_manifest.json`, copies the
+launching `config.yaml` into `output_dir`, and mirrors every
+`predicted_library_*.tsv` (symlink when possible, copy otherwise) into
+`output_dir/predicted_libraries/`. The manifest records `diaquant_version`,
+`predicted_library.applied`, `rescoring.applied`, PSM counts at each stage,
+and the row counts of all three matrices — so you can verify, after the
+container exits, *exactly* which code ran and whether the AlphaPeptDeep
+library was actually joined to the Sage PSMs.
+
+**C. Razor-peptide protein grouping (`diaquant.razor`).** The old code used
+`Sage.Protein.Ids.split(';')[0]` as `Protein.Group`, which silently pinned
+every shared peptide to the alphabetically-first accession and flagged it
+`Proteotypic=0`. The new module groups accessions with identical candidate
+sets into one semicolon-joined `Protein.Group`, then Occam-razors shared
+peptides to the group with the most unique peptides. After razor assignment
+every peptide unambiguously supports exactly one group, matching DIA-NN's
+pg_matrix convention.
+
+**D. Peptide/protein-FDR dials exposed.** `peptide_fdr` and `protein_fdr`
+are now first-class fields in the starter YAML produced by
+`diaquant init-config` so users can match DIA-NN's 0.01/0.01 defaults or
+relax them (e.g. 0.05) on deep-proteome DIA datasets.
+
+### How to verify the fix in your own run
+1. Run any job with v0.5.4 and open `output_dir/run_manifest.json`.
+2. Confirm `"diaquant_version": "0.5.4"`, `"predicted_library.applied":
+   true`, `"rescoring.applied": true`, and that `matrices.pg_matrix_rows`
+   is close to the distinct-accession count in `pr_matrix`.
+3. `output_dir/predicted_libraries/` should contain at least one TSV per
+   pass, usually as a symlink into the shared cache.
+
+### Breaking changes
+- `quant_min_samples` default changed from 2 → 1. Projects that rely on the
+  stricter cut-off should set it explicitly in their YAML.

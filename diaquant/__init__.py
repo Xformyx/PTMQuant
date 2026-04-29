@@ -21,7 +21,22 @@ Modules:
 - writer:             DIA-NN compatible TSV emitters; 0.5.3 site matrix now
                       emits Protein.Group, Genes, PTM.Site (absolute position)
                       and Best.Site.Probability columns.
+- razor:              v0.5.4 Occam razor protein grouping; shared peptides
+                      are razor-assigned to the parent protein with the most
+                      unique peptides, and groups with identical peptide sets
+                      are merged into a single semicolon-joined Protein.Group.
+- manifest:           v0.5.4 writer for run_manifest.json + config.yaml copy
+                      + predicted_library mirror into output_dir for full
+                      observability of what actually ran.
 - cli:                click-based command-line interface
+
+v0.5.4 changes (the 3x-gap fix):
+  A. quant_min_samples default lowered 2 -> 1 (matches DIA-NN), plus new
+     min_peptides_per_protein knob in starter YAML.
+  B. Every run writes run_manifest.json, copies config.yaml into output_dir,
+     and mirrors predicted_library_*.tsv files alongside the matrices.
+  C. razor module replaces "Protein.Ids[0]" with Occam razor grouping.
+  D. peptide_fdr / protein_fdr exposed in starter YAML.
 """
 
-__version__ = "0.5.3.1"
+__version__ = "0.5.4"

@@ -31,6 +31,8 @@ from .multipass import run_multipass
 from .parse_sage import attach_fasta_meta, parse_sage_tsv
 from .ptm_profiles import PASS_PROFILES, list_builtin_passes
 from .quantify import precursor_matrix, protein_quant, site_quant
+from .manifest import write_run_manifest
+from .razor import apply_razor_grouping
 from .rt_align import RTAlignParams, align_runs, write_rt_stats
 from .sage_runner import run_sage, run_sage_batched
 from .stats import differential, load_sample_sheet
@@ -102,11 +104,23 @@ def init_config(out: str, fasta: str, mzml_dir: str,
         "precursor_tol_ppm": preset.precursor_tol_ppm,
         "fragment_tol_ppm": preset.fragment_tol_ppm,
         "psm_fdr": 0.01,
+        # v0.5.4: peptide/protein FDR dials exposed in the starter YAML so
+        # users can match DIA-NN's peptide-0.01 / protein-0.01 defaults or
+        # relax them (e.g. 0.05) when searching deep-proteome DIA data.
+        "peptide_fdr": 0.01,
+        "protein_fdr": 0.01,
         "site_probability_cutoff": 0.75,
         "include_low_loc_sites": False,
         "match_between_runs": True,
         "scoring_mode": "peptidoforms",
         "machine_learning": "nn_cv",
+        # v0.5.4 (Fix A): directLFQ min_nonan.  DIA-NN-equivalent default = 1.
+        # Raise to 2 when replicates per condition are >= 3 and you want to
+        # drop proteins seen in only a single run.
+        "quant_min_samples": 1,
+        # v0.5.4 (Fix A2): minimum distinct peptides required to keep a
+        # protein group in pg_matrix (razor peptides count as the group's).
+        "min_peptides_per_protein": 1,
         # ---- 0.5.0: AlphaPeptDeep predicted spectral library ----
         "predicted_library": True,
         "pred_lib_instrument": preset.pred_lib_instrument,
@@ -231,6 +245,13 @@ def run(cfg_path: str, resume: bool) -> None:
             peptide_fdr=cfg.peptide_fdr,
         )
         long_df = attach_fasta_meta(long_df, cfg.fasta)
+        # v0.5.4: keep run_manifest fields consistent in single-pass mode.
+        # Predicted-library generation in single-pass mode is handled below
+        # (multipass uses its own plumbing); for now record zeros so the
+        # manifest never has KeyError on attrs.get.
+        long_df.attrs.setdefault("predicted_library_paths", [])
+        long_df.attrs.setdefault("n_psms_raw_total", len(long_df))
+        long_df.attrs.setdefault("n_psms_rescored_total", 0)
 
     if long_df.empty:
         # Sage found PSMs but all were removed by FDR / other filters.
@@ -329,6 +350,23 @@ def run(cfg_path: str, resume: bool) -> None:
         click.secho("[diaquant] done (no identifications).", fg="yellow")
         return
 
+    # ----- v0.5.4 (Fix C): razor-peptide protein grouping -----
+    # Sage assigns every shared peptide to the alphabetically-first accession
+    # and marks it Proteotypic=0, which downstream causes 1/3 of all proteins
+    # to be dropped at the pg roll-up step.  Replace that with the standard
+    # Occam razor grouping used by DIA-NN / MaxQuant so every peptide lands
+    # on exactly one protein group and Proteotypic flags are recomputed.
+    click.echo("[diaquant] razor-peptide protein grouping")
+    _n_acc_before = long_df["Protein.Group"].nunique()
+    long_df = apply_razor_grouping(
+        long_df,
+        min_peptides_per_protein=getattr(cfg, "min_peptides_per_protein", 1),
+    )
+    click.echo(
+        f"  accession groups: {_n_acc_before} → {long_df['Protein.Group'].nunique()} "
+        f"(razor+merge)"
+    )
+
     pr_wide = precursor_matrix(long_df)
     pg_lfq = protein_quant(long_df, min_samples=cfg.quant_min_samples)
     site_lfq = site_quant(
@@ -360,11 +398,32 @@ def run(cfg_path: str, resume: bool) -> None:
         except Exception as exc:                           # pragma: no cover
             click.secho(f"  (skipping pg differential: {exc})", fg="yellow")
 
+    # ----- v0.5.4 (Fix B): run_manifest.json + config.yaml + lib copies -----
+    try:
+        manifest_path = write_run_manifest(
+            cfg,
+            out,
+            diaquant_version=__version__,
+            config_yaml_src=Path(cfg_path),
+            library_paths=long_df.attrs.get("predicted_library_paths", []),
+            n_psms_raw=long_df.attrs.get("n_psms_raw_total"),
+            n_psms_rescored=long_df.attrs.get("n_psms_rescored_total"),
+            n_psms_after_fdr=len(long_df),
+            pr_rows=len(pr_wide),
+            pg_rows=len(pg_lfq) if pg_lfq is not None else 0,
+            site_rows=len(site_lfq) if site_lfq is not None else 0,
+        )
+    except Exception as exc:
+        click.secho(f"  (run_manifest write failed: {exc})", fg="yellow")
+        manifest_path = None
+
     click.secho("[diaquant] done.", fg="green")
     click.echo(f"  wrote {out/'report.pr_matrix.tsv'}")
     click.echo(f"  wrote {out/'report.pg_matrix.tsv'}")
     click.echo(f"  wrote {out/'report.ptm_site_matrix.tsv'}")
     click.echo(f"  wrote {out/'report.tsv'}")
+    if manifest_path:
+        click.echo(f"  wrote {manifest_path}")
 
 
 if __name__ == "__main__":

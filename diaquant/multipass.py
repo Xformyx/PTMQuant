@@ -99,6 +99,12 @@ def run_multipass(base: DiaQuantConfig, resume: bool = False) -> Tuple[pd.DataFr
     )
 
     per_pass: Dict[str, pd.DataFrame] = {}
+    # v0.5.4: remember every predicted-library TSV we generated/reused so the
+    # caller (cli.run) can drop copies into out_dir for user-side verification.
+    library_paths: List[Path] = []
+    # Diagnostic counters the caller writes into run_manifest.json
+    n_psms_raw_total = 0
+    n_psms_rescored_total = 0
     for i, profile in enumerate(profiles):
         print(f"[diaquant] -> pass '{profile.name}': "
               f"vars={profile.variable_modifications} "
@@ -124,6 +130,8 @@ def run_multipass(base: DiaQuantConfig, resume: bool = False) -> Tuple[pd.DataFr
                     library_tsv = None
                 else:
                     raise
+            if library_tsv is not None:
+                library_paths.append(Path(library_tsv))
 
         # Resume mode: reuse existing Sage results if present; otherwise
         # run the (auto-batched) Sage search so both the 0.4.x resume
@@ -140,10 +148,12 @@ def run_multipass(base: DiaQuantConfig, resume: bool = False) -> Tuple[pd.DataFr
                             site_cutoff=pass_cfg.site_probability_cutoff,
                             peptide_fdr=pass_cfg.peptide_fdr)
         df = attach_fasta_meta(df, pass_cfg.fasta)
+        n_psms_raw_total += len(df)
 
         # ---- 0.5.0: post-hoc rescoring with AlphaPeptDeep RT prediction ----
         if pass_cfg.rescore_with_prediction and library_tsv is not None:
             df = rescore_with_predicted_library(df, library_tsv, pass_cfg)
+            n_psms_rescored_total += len(df)
 
         df = _annotate_pass(df, profile)
         per_pass[profile.name] = df
@@ -185,4 +195,9 @@ def run_multipass(base: DiaQuantConfig, resume: bool = False) -> Tuple[pd.DataFr
         merged = merged.sort_values(["Is.Whole.Proteome.Pass"], ascending=False)
     merged = merged.drop_duplicates(["filename", "Precursor.Id"], keep="first")
     print(f"[diaquant] merged unique precursors: {len(merged)}")
+    # v0.5.4: stash diagnostics on the merged frame so cli.run can surface them
+    # in run_manifest.json without plumbing more return values through.
+    merged.attrs["predicted_library_paths"] = library_paths
+    merged.attrs["n_psms_raw_total"] = n_psms_raw_total
+    merged.attrs["n_psms_rescored_total"] = n_psms_rescored_total
     return merged, per_pass

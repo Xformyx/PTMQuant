@@ -678,3 +678,134 @@ def test_site_quant_translates_protein_group_to_accession():
     key = site_lfq["protein"].iloc[0]
     assert key.startswith("P1|TEST|S6|"), key
     assert "_local" not in key, "Should resolve to absolute position, not _local fallback"
+
+
+# ---------------------------------------------------------------------------
+# v0.5.4 regression tests
+# ---------------------------------------------------------------------------
+
+def test_version_bumped_to_054():
+    import diaquant
+    assert diaquant.__version__.startswith("0.5.4"), diaquant.__version__
+
+
+def test_razor_assigns_unique_peptide_to_sole_parent():
+    from diaquant.razor import apply_razor_grouping
+    df = pd.DataFrame({
+        "Stripped.Sequence": ["AAAAAAK", "AAAAAAK", "BBBBBBK"],
+        "Protein.Ids":       ["P1",       "P1",      "P1;P2"],
+    })
+    out = apply_razor_grouping(df)
+    # AAAAAAK is single-candidate -> P1 unconditionally
+    pg = dict(zip(out["Stripped.Sequence"], out["Protein.Group"]))
+    assert pg["AAAAAAK"] == "P1"
+
+
+def test_razor_assigns_shared_peptide_to_most_supported_parent():
+    from diaquant.razor import apply_razor_grouping
+    # P1 has 2 unique peptides, P2 has none. Shared peptide must go to P1.
+    df = pd.DataFrame({
+        "Stripped.Sequence": ["U1K", "U2K", "SHAREDK", "SHAREDK"],
+        "Protein.Ids":       ["P1",  "P1",  "P1;P2",   "P1;P2"],
+    })
+    out = apply_razor_grouping(df)
+    pg = dict(zip(out["Stripped.Sequence"], out["Protein.Group"]))
+    assert pg["SHAREDK"] == "P1"
+    # and shared peptides must be flagged Proteotypic for their group
+    shared_rows = out[out["Stripped.Sequence"] == "SHAREDK"]
+    assert (shared_rows["Proteotypic"] == 1).all()
+
+
+def test_razor_merges_identical_peptide_sets_into_semicolon_group():
+    from diaquant.razor import apply_razor_grouping
+    # P3 and P4 are both supported ONLY by the same shared peptide set.
+    # They must be merged into a single group "P3;P4".
+    df = pd.DataFrame({
+        "Stripped.Sequence": ["XYZK", "XYZK", "WWWK"],
+        "Protein.Ids":       ["P3;P4", "P3;P4", "P3;P4"],
+    })
+    out = apply_razor_grouping(df)
+    groups = set(out["Protein.Group"].unique())
+    assert groups == {"P3;P4"}, groups
+
+
+def test_razor_respects_min_peptides_per_protein():
+    from diaquant.razor import apply_razor_grouping
+    df = pd.DataFrame({
+        "Stripped.Sequence": ["ONLYPEPK", "TWOAK", "TWOBK"],
+        "Protein.Ids":       ["PA",       "PB",    "PB"],
+    })
+    out = apply_razor_grouping(df, min_peptides_per_protein=2)
+    # PA only has 1 peptide -> filtered out; PB survives with TWOAK + TWOBK.
+    assert set(out["Protein.Group"]) == {"PB"}
+
+
+def test_manifest_writes_expected_keys(tmp_path):
+    from diaquant.manifest import write_run_manifest
+    from diaquant.config import DiaQuantConfig
+    import json
+    cfg = DiaQuantConfig(
+        fasta=tmp_path / "x.fasta",
+        mzml_files=[tmp_path / "a.mzML"],
+        output_dir=tmp_path,
+        predicted_library=True,
+        rescore_with_prediction=True,
+    )
+    yaml_src = tmp_path / "config.yaml"
+    yaml_src.write_text("hello: world\n")
+    lib = tmp_path / "predicted_library_abc.tsv"
+    lib.write_text("header\nrow1\nrow2\n")
+    out = write_run_manifest(
+        cfg, tmp_path,
+        diaquant_version="0.5.4",
+        config_yaml_src=yaml_src,
+        library_paths=[lib],
+        n_psms_raw=123, n_psms_rescored=99, n_psms_after_fdr=88,
+        pr_rows=50, pg_rows=10, site_rows=3,
+    )
+    data = json.loads(out.read_text())
+    assert data["diaquant_version"] == "0.5.4"
+    assert data["predicted_library"]["applied"] is True
+    assert data["rescoring"]["applied"] is True
+    assert data["matrices"] == {
+        "pr_matrix_rows": 50, "pg_matrix_rows": 10, "ptm_site_matrix_rows": 3,
+    }
+    # config.yaml should have been copied into tmp_path
+    assert (tmp_path / "config.yaml").exists()
+    # predicted library mirrored / symlinked
+    assert (tmp_path / "predicted_libraries" / lib.name).exists()
+
+
+def test_manifest_flags_predicted_library_off_when_no_files(tmp_path):
+    from diaquant.manifest import write_run_manifest
+    from diaquant.config import DiaQuantConfig
+    import json
+    cfg = DiaQuantConfig(
+        fasta=tmp_path / "x.fasta",
+        mzml_files=[tmp_path / "a.mzML"],
+        output_dir=tmp_path,
+        predicted_library=True,
+        rescore_with_prediction=True,
+    )
+    out = write_run_manifest(
+        cfg, tmp_path, diaquant_version="0.5.4",
+        config_yaml_src=None, library_paths=[],
+    )
+    data = json.loads(out.read_text())
+    # enabled in config but zero files -> applied must be False
+    assert data["predicted_library"]["enabled_in_config"] is True
+    assert data["predicted_library"]["applied"] is False
+    # rescoring is gated on predicted_library.applied
+    assert data["rescoring"]["applied"] is False
+
+
+def test_quant_min_samples_default_is_one():
+    from diaquant.config import DiaQuantConfig
+    from pathlib import Path
+    cfg = DiaQuantConfig(
+        fasta=Path("/tmp/x.fasta"),
+        mzml_files=[Path("/tmp/a.mzML")],
+        output_dir=Path("/tmp/out"),
+    )
+    assert cfg.quant_min_samples == 1
+    assert cfg.min_peptides_per_protein == 1

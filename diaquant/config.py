@@ -86,7 +86,16 @@ class DiaQuantConfig:
 
     # ---- quantification (DIA-NN: "QuantUMS", "MBR") ----
     quant_top_n_fragments: int = 6
-    quant_min_samples: int = 2
+    # v0.5.4 (Fix A): relaxed from 2 to 1 — the v0.5.2/v0.5.3 default of 2
+    # silently dropped every protein quantified in only one of the 12 input
+    # runs, which on the user's KBSI dataset removed 1,519 proteins (43 %)
+    # that *were* present in ``pr_matrix`` but failed directLFQ's ``min_nonan``
+    # gate at the pg roll-up step.  DIA-NN's equivalent default is 1.
+    quant_min_samples: int = 1
+    # v0.5.4 (Fix A2): minimum proteotypic+razor peptides a protein must have
+    # to appear in ``pg_matrix``.  DIA-NN uses 1 by default; raise to 2 or 3
+    # for stricter whole-proteome publications.
+    min_peptides_per_protein: int = 1
     match_between_runs: bool = True         # DIA-NN MBR
     machine_learning: str = "nn_cv"         # 'nn_cv' | 'linear'  (DIA-NN: NNs cross-validated)
 

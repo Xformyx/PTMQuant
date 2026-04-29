@@ -82,7 +82,7 @@ def parse_sage_tsv(path: Path,
         df = df[df["Peptide.Q.Value"] <= peptide_fdr]
         import logging
         logging.getLogger(__name__).info(
-            "FDR filter (peptide_q ≤ %.3f): %d → %d PSMs", peptide_fdr, before, len(df)
+            "FDR filter (peptide_q \u2264 %.3f): %d \u2192 %d PSMs", peptide_fdr, before, len(df)
         )
 
     # PTM site localization
@@ -101,16 +101,25 @@ def parse_sage_tsv(path: Path,
     return df
 
 
-def attach_fasta_meta(df: pd.DataFrame, fasta: Path) -> pd.DataFrame:
-    """Fill Genes / Protein.Names / First.Protein.Description from a UniProt FASTA."""
+def load_fasta_records(fasta: Path) -> dict:
+    """Return ``{accession: {"name", "gene", "descr", "seq"}}`` for every entry.
+
+    Exposed as a module-level helper so the site-matrix roll-up (new in 0.5.3)
+    can look up the parent protein sequence to compute absolute site positions
+    without re-parsing the FASTA.
+    """
     from pyteomics import fasta as pf
 
-    meta = {}
+    records: dict = {}
     with pf.read(str(fasta)) as reader:
-        for header, _seq in reader:
-            # >sp|P12345|GENE_HUMAN Description OS=… OX=… GN=GeneSym PE=… SV=…
+        for header, seq in reader:
+            # UniProt-style:  >sp|P12345|GENE_HUMAN Description OS=... GN=...
             m = re.match(r"^[a-z]{2}\|([^|]+)\|(\S+)\s*(.*)$", header)
             if not m:
+                acc = header.split()[0]
+                records[acc] = {
+                    "name": acc, "gene": "", "descr": header, "seq": seq,
+                }
                 continue
             acc, name, rest = m.groups()
             gene = ""
@@ -118,12 +127,29 @@ def attach_fasta_meta(df: pd.DataFrame, fasta: Path) -> pd.DataFrame:
             if gn:
                 gene = gn.group(1)
             descr = re.sub(r"\s+(OS|OX|GN|PE|SV)=.*$", "", rest)
-            meta[acc] = (name, gene, descr)
+            records[acc] = {
+                "name": name, "gene": gene, "descr": descr, "seq": seq,
+            }
+    return records
 
-    def fill(row, idx):
-        return meta.get(row["Protein.Group"], ("", "", ""))[idx]
 
-    df["Protein.Names"] = df.apply(lambda r: fill(r, 0), axis=1)
-    df["Genes"] = df.apply(lambda r: fill(r, 1), axis=1)
-    df["First.Protein.Description"] = df.apply(lambda r: fill(r, 2), axis=1)
+def attach_fasta_meta(df: pd.DataFrame, fasta: Path) -> pd.DataFrame:
+    """Fill Genes / Protein.Names / First.Protein.Description from a UniProt FASTA.
+
+    The parsed FASTA records are cached on ``df.attrs['fasta_records']`` so
+    the 0.5.3 site-matrix roll-up can compute absolute PTM positions without
+    re-reading the FASTA.
+    """
+    records = load_fasta_records(fasta)
+
+    def fill(row, key, default=""):
+        return records.get(row["Protein.Group"], {}).get(key, default)
+
+    df["Protein.Names"] = df.apply(lambda r: fill(r, "name"), axis=1)
+    df["Genes"] = df.apply(lambda r: fill(r, "gene"), axis=1)
+    df["First.Protein.Description"] = df.apply(
+        lambda r: fill(r, "descr"), axis=1
+    )
+    # Stash records so site_quant() can look up sequences without re-parsing.
+    df.attrs["fasta_records"] = records
     return df

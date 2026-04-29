@@ -133,8 +133,19 @@ def _hash_fasta(fasta: Path) -> str:
     return h.hexdigest()[:12]
 
 
+# Bump this when the AlphaPeptDeep / alphabase model family changes so we do
+# not accidentally reuse a cached library predicted by a different model.
+_MODEL_VERSION = "peptdeep-generic-1"
+
+
 def _cache_key(cfg: DiaQuantConfig, fix_mods: List[str], var_mods: List[str]) -> str:
-    """Deterministic cache key for one predicted-library run."""
+    """Deterministic cache key for one predicted-library run.
+
+    All parameters that change the output library participate in the hash, so
+    two jobs with the same FASTA / species / enzyme / PTM set / instrument /
+    mz-range end up pointing at the same cached TSV regardless of where the
+    job was submitted from.
+    """
     payload = {
         "fasta": _hash_fasta(cfg.fasta),
         "enzyme": cfg.enzyme,
@@ -150,9 +161,65 @@ def _cache_key(cfg: DiaQuantConfig, fix_mods: List[str], var_mods: List[str]) ->
         "nce": cfg.pred_lib_nce,
         "fix_mods": sorted(fix_mods),
         "var_mods": sorted(var_mods),
+        "model": _MODEL_VERSION,
     }
     blob = json.dumps(payload, sort_keys=True).encode()
     return hashlib.sha1(blob).hexdigest()[:16]
+
+
+def _resolve_cache_paths(
+    cfg: DiaQuantConfig, out_dir: Path, cache_id: str
+) -> Tuple[Path, Optional[Path]]:
+    """Return ``(local_path, shared_path)`` for the given cache id.
+
+    * ``local_path`` is always under the per-pass ``out_dir``.  This is the
+      legacy 0.5.1 location and is still written so Sage can pick it up on a
+      resumed run.
+    * ``shared_path`` is under ``cfg.pred_lib_cache_dir`` when configured and
+      is the cross-job cache that makes identical jobs instantaneous.  It is
+      ``None`` when the user has not configured a shared cache directory.
+    """
+    local = Path(out_dir) / f"predicted_library_{cache_id}.tsv"
+    shared: Optional[Path] = None
+    if cfg.pred_lib_cache_dir is not None:
+        shared = Path(cfg.pred_lib_cache_dir) / f"predicted_library_{cache_id}.tsv"
+    return local, shared
+
+
+def _write_cache_meta(path: Path, cfg: DiaQuantConfig,
+                      fix_mods: List[str], var_mods: List[str],
+                      cache_id: str) -> None:
+    """Write a sibling ``.meta.json`` describing what is in the cached TSV.
+
+    The metadata file makes the shared cache human-auditable: an operator can
+    see at a glance which FASTA / species / PTM set produced each cached
+    library without running diaquant.
+    """
+    meta = {
+        "cache_id": cache_id,
+        "fasta": str(cfg.fasta),
+        "fasta_sha1_12": _hash_fasta(cfg.fasta),
+        "enzyme": cfg.enzyme,
+        "missed_cleavages": cfg.missed_cleavages,
+        "min_peptide_length": cfg.min_peptide_length,
+        "max_peptide_length": cfg.max_peptide_length,
+        "min_precursor_charge": cfg.min_precursor_charge,
+        "max_precursor_charge": cfg.max_precursor_charge,
+        "min_precursor_mz": cfg.min_precursor_mz,
+        "max_precursor_mz": cfg.max_precursor_mz,
+        "max_variable_mods": cfg.max_variable_mods,
+        "pred_lib_instrument": cfg.pred_lib_instrument,
+        "pred_lib_nce": cfg.pred_lib_nce,
+        "fix_mods": sorted(fix_mods),
+        "var_mods": sorted(var_mods),
+        "model_version": _MODEL_VERSION,
+    }
+    try:
+        path.with_suffix(".meta.json").write_text(
+            json.dumps(meta, indent=2, sort_keys=True)
+        )
+    except Exception as exc:  # pragma: no cover - metadata is best-effort
+        log.debug("Could not write cache metadata %s (%s)", path, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -282,12 +349,39 @@ def generate_predicted_library(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     cache_id = _cache_key(cfg, fix_mods, var_mods)
-    out_tsv = out_dir / f"predicted_library_{cache_id}.tsv"
+    local_tsv, shared_tsv = _resolve_cache_paths(cfg, out_dir, cache_id)
 
-    if cfg.pred_lib_cache and out_tsv.exists():
-        log.info("[diaquant] %s: reusing cached predicted library %s",
-                 pass_label, out_tsv.name)
-        return out_tsv
+    # --- cache lookup ---------------------------------------------------
+    # Priority order: shared cross-job cache > per-pass local cache.  When
+    # the shared cache has a hit we also symlink / copy it into the local
+    # out_dir so that every diaquant run appears self-contained on disk.
+    if cfg.pred_lib_cache:
+        if shared_tsv is not None and shared_tsv.exists():
+            log.info("[diaquant] %s: reusing SHARED predicted library %s",
+                     pass_label, shared_tsv)
+            if not local_tsv.exists():
+                try:
+                    local_tsv.symlink_to(shared_tsv)
+                except Exception:
+                    import shutil as _sh
+                    _sh.copyfile(shared_tsv, local_tsv)
+            return local_tsv
+        if local_tsv.exists():
+            log.info("[diaquant] %s: reusing local predicted library %s",
+                     pass_label, local_tsv.name)
+            # Promote hit into shared cache so the next job benefits.
+            if shared_tsv is not None:
+                try:
+                    shared_tsv.parent.mkdir(parents=True, exist_ok=True)
+                    if not shared_tsv.exists():
+                        import shutil as _sh
+                        _sh.copyfile(local_tsv, shared_tsv)
+                        _write_cache_meta(shared_tsv, cfg, fix_mods, var_mods, cache_id)
+                except Exception as exc:  # pragma: no cover
+                    log.debug("Could not promote local cache to shared (%s)", exc)
+            return local_tsv
+
+    out_tsv = local_tsv
 
     handles = _load_alphapeptdeep()
     if handles is None:
@@ -334,6 +428,20 @@ def generate_predicted_library(
         )
         log.info("[diaquant] %s: predicted library written to %s",
                  pass_label, out_tsv)
+        # Populate shared cache on first computation so the next job of any
+        # other user on the same platform instance can reuse this library.
+        if cfg.pred_lib_cache and shared_tsv is not None:
+            try:
+                shared_tsv.parent.mkdir(parents=True, exist_ok=True)
+                if not shared_tsv.exists():
+                    import shutil as _sh
+                    _sh.copyfile(out_tsv, shared_tsv)
+                    _write_cache_meta(shared_tsv, cfg, fix_mods, var_mods, cache_id)
+                    log.info("[diaquant] %s: promoted library to shared cache %s",
+                             pass_label, shared_tsv)
+            except Exception as exc:  # pragma: no cover
+                log.warning("Could not write shared cache (%s)", exc)
+        _write_cache_meta(out_tsv, cfg, fix_mods, var_mods, cache_id)
         return out_tsv
     except Exception as exc:  # pragma: no cover
         log.warning(

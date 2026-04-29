@@ -482,3 +482,119 @@ def test_sage_runner_uses_enzyme_catalog(tmp_path):
     assert sage["database"]["enzyme"]["cleave_at"] == "E"
     assert sage["database"]["enzyme"]["restrict"] is None
     assert sage["database"]["enzyme"]["missed_cleavages"] == 3
+
+
+# ---------------------------------------------------------------------------
+# 0.5.3: shared predicted-library cache + site-matrix absolute position + loc filter
+# ---------------------------------------------------------------------------
+
+def test_pred_lib_cache_dir_from_env(tmp_path, monkeypatch):
+    """``PTMQUANT_LIB_CACHE_DIR`` env var is picked up by DiaQuantConfig."""
+    import yaml
+    from diaquant.config import DiaQuantConfig
+
+    fasta = tmp_path / "tiny.fasta"
+    fasta.write_text(">sp|P1|TEST_HUMAN test OS=H GN=TEST PE=1 SV=1\nMKAAAASTPEPTIDEK\n")
+    mz = tmp_path / "a.mzML"
+    mz.write_text("")
+
+    yaml_path = tmp_path / "cfg.yaml"
+    yaml.safe_dump({
+        "fasta": str(fasta),
+        "mzml_files": [str(mz)],
+        "output_dir": str(tmp_path / "out"),
+    }, yaml_path.open("w"))
+
+    shared = tmp_path / "shared_cache"
+    monkeypatch.setenv("PTMQUANT_LIB_CACHE_DIR", str(shared))
+    cfg = DiaQuantConfig.from_yaml(yaml_path)
+    assert cfg.pred_lib_cache_dir == shared
+
+
+def test_pred_lib_resolve_cache_paths(tmp_path, monkeypatch):
+    """``_resolve_cache_paths`` returns shared + local paths when configured."""
+    from diaquant.config import DiaQuantConfig
+    from diaquant.predicted_library import _resolve_cache_paths
+
+    fasta = tmp_path / "t.fasta"
+    fasta.write_text(">sp|P1|T_HUMAN test GN=T\nMAAA\n")
+    mz = tmp_path / "b.mzML"
+    mz.write_text("")
+    shared = tmp_path / "lib_cache"
+    shared.mkdir()
+
+    cfg = DiaQuantConfig(fasta=fasta, mzml_files=[mz],
+                         output_dir=tmp_path / "out")
+    cfg.pred_lib_cache_dir = shared
+
+    local, sh = _resolve_cache_paths(cfg, tmp_path / "pass_x", "abc123")
+    assert local.name == "predicted_library_abc123.tsv"
+    assert sh is not None and sh.parent == shared
+    assert sh.name == local.name
+
+
+def test_site_matrix_uses_absolute_position(tmp_path):
+    """``site_quant`` + ``write_site_matrix`` emit <accession>|<gene>|<S+abs>|<mod>."""
+    from diaquant.quantify import site_quant
+    from diaquant.writer import write_site_matrix
+
+    # Synthetic: protein = MKAAASTPEPTIDEKXXXSTR, peptide AAASTPEPTIDEK starts at 3.
+    protein_seq = "MKAAASTPEPTIDEKXXXSTR"
+    peptide = "AAASTPEPTIDEK"
+    fasta_records = {"P1": {"name": "P1_HUMAN", "gene": "TEST",
+                            "descr": "test", "seq": protein_seq}}
+
+    long_df = pd.DataFrame({
+        "filename": ["s1.mzML", "s2.mzML"],
+        "Protein.Group": ["P1", "P1"],
+        "Genes": ["TEST", "TEST"],
+        "Stripped.Sequence": [peptide, peptide],
+        "Modified.Sequence": [peptide, peptide],
+        "Precursor.Id": [peptide + "2", peptide + "2"],
+        "Intensity": [1e6, 2e6],
+        "PTM.Site.Positions": ["S4", "S4"],        # peptide-local S at pos 4 -> abs 6
+        "PTM.Modification": ["+79.9663", "+79.9663"],
+        "Best.Site.Probability": [0.99, 0.98],
+    })
+    long_df.attrs["fasta_records"] = fasta_records
+
+    site_lfq = site_quant(long_df, min_samples=1,
+                          localization_cutoff=0.75)
+    assert not site_lfq.empty
+    assert site_lfq["protein"].iloc[0] == "P1|TEST|S6|+79.9663"
+
+    out = tmp_path / "site.tsv"
+    write_site_matrix(site_lfq, out)
+    df = pd.read_csv(out, sep="\t")
+    assert set(["Protein.Group", "Genes", "PTM.Site",
+                "PTM.Modification"]) <= set(df.columns)
+    assert df["Protein.Group"].iloc[0] == "P1"
+    assert df["PTM.Site"].iloc[0] == "S6"
+
+
+def test_site_matrix_localization_filter_drops_low_loc():
+    """Precursors with loc prob below cutoff are excluded by default."""
+    from diaquant.quantify import site_quant
+
+    long_df = pd.DataFrame({
+        "filename": ["a.mzML", "b.mzML"],
+        "Protein.Group": ["P1", "P1"],
+        "Genes": ["T", "T"],
+        "Stripped.Sequence": ["AAASK", "AAASK"],
+        "Modified.Sequence": ["AAASK", "AAASK"],
+        "Precursor.Id": ["AAASK2", "AAASK2"],
+        "Intensity": [1e5, 2e5],
+        "PTM.Site.Positions": ["S4", "S4"],
+        "PTM.Modification": ["+79.9663", "+79.9663"],
+        "Best.Site.Probability": [0.20, 0.30],
+    })
+    long_df.attrs["fasta_records"] = {
+        "P1": {"name": "P1", "gene": "T", "descr": "", "seq": "MKAAASK"}
+    }
+
+    strict = site_quant(long_df, min_samples=1, localization_cutoff=0.75)
+    assert strict.empty, "Low-localization precursors should be excluded"
+
+    permissive = site_quant(long_df, min_samples=1,
+                            localization_cutoff=0.75, include_low_loc=True)
+    assert not permissive.empty

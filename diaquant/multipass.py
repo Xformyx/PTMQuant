@@ -164,6 +164,13 @@ def run_multipass(base: DiaQuantConfig, resume: bool = False) -> Tuple[pd.DataFr
         raise RuntimeError("No passes produced output.")
 
     merged = pd.concat(per_pass.values(), ignore_index=True, sort=False)
+    # pandas.concat drops ``.attrs``; reattach the FASTA records from the first
+    # pass that carries them so site_quant can compute absolute PTM positions.
+    for _pass_df in per_pass.values():
+        rec = getattr(_pass_df, "attrs", {}).get("fasta_records")
+        if rec:
+            merged.attrs["fasta_records"] = rec
+            break
 
     # When the same (filename, Precursor.Id) appears in multiple passes
     # (typical for unmodified peptides that are reported by every pass),

@@ -193,11 +193,23 @@ def site_quant(precursor_long: pd.DataFrame,
     fasta_records = precursor_long.attrs.get("fasta_records") \
         if hasattr(precursor_long, "attrs") else None
 
+    # v0.5.3.1: Protein.Group is the full ``sp|P12345|GENE_HUMAN`` Sage tag,
+    # but fasta_records is keyed on the bare UniProt accession.  Translate
+    # each Protein.Group to its accession before the FASTA lookup; otherwise
+    # _abs_site_keys() falls back to ``_local`` and the writer drops the row.
+    extract_acc = (
+        precursor_long.attrs.get("protein_group_accession")
+        if hasattr(precursor_long, "attrs") else None
+    )
+    if extract_acc is None:
+        # Fall back to in-module helper if attach_fasta_meta() never ran.
+        from .parse_sage import _extract_accession as extract_acc
+
     df["__site_keys__"] = df.apply(
         lambda r: _abs_site_keys(
             stripped_seq=str(r.get("Stripped.Sequence", "")),
             site_positions=str(r.get("PTM.Site.Positions", "")),
-            accession=str(r.get("Protein.Group", "")),
+            accession=extract_acc(str(r.get("Protein.Group", ""))),
             gene=str(r.get("Genes", "") or ""),
             mod_name=str(r.get("PTM.Modification", "none")),
             fasta_records=fasta_records,

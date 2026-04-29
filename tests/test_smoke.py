@@ -598,3 +598,83 @@ def test_site_matrix_localization_filter_drops_low_loc():
     permissive = site_quant(long_df, min_samples=1,
                             localization_cutoff=0.75, include_low_loc=True)
     assert not permissive.empty
+
+
+def test_attach_fasta_meta_handles_full_protein_group():
+    """v0.5.3.1: ``Protein.Group`` like ``sp|P1|GENE_HUMAN`` is normalised before FASTA lookup.
+
+    Regression test for the v0.5.2/v0.5.3 bug where every Genes / Protein.Names
+    /  First.Protein.Description cell came out empty because the lookup key was
+    the full Sage tag instead of the bare UniProt accession.
+    """
+    import tempfile
+    from pathlib import Path
+    from diaquant.parse_sage import attach_fasta_meta, _extract_accession
+
+    # Direct helper checks
+    assert _extract_accession("sp|P12345|GENE_HUMAN") == "P12345"
+    assert _extract_accession("rev_sp|P12345|GENE_HUMAN") == "P12345"
+    assert _extract_accession("tr|Q67890|UNREVIEWED_HUMAN") == "Q67890"
+    assert _extract_accession("P12345") == "P12345"
+    assert _extract_accession("sp|P1|G;sp|P2|H") == "P1"  # group → first
+
+    with tempfile.TemporaryDirectory() as td:
+        fasta = Path(td) / "tiny.fasta"
+        fasta.write_text(
+            ">sp|P12345|GENE_HUMAN My favourite protein OS=Homo sapiens "
+            "OX=9606 GN=MYGENE PE=1 SV=2\nMKAAAASTPEPTIDEK\n"
+            ">sp|Q9XYZ0|OTHER_HUMAN Another GN=OTHER\nMAAA\n"
+        )
+        df = pd.DataFrame({
+            "Protein.Group": [
+                "sp|P12345|GENE_HUMAN",
+                "rev_sp|P12345|GENE_HUMAN",   # decoy
+                "sp|Q9XYZ0|OTHER_HUMAN",
+                "sp|UNKNOWN|MISSING_HUMAN",   # unmatched
+            ]
+        })
+        out = attach_fasta_meta(df, fasta)
+        assert out["Genes"].tolist() == ["MYGENE", "MYGENE", "OTHER", ""]
+        assert out["Protein.Names"].iloc[0] == "GENE_HUMAN"
+        assert "favourite" in out["First.Protein.Description"].iloc[0]
+        # Records + extractor are stashed for site_quant().
+        assert "fasta_records" in out.attrs
+        assert "P12345" in out.attrs["fasta_records"]
+        assert callable(out.attrs.get("protein_group_accession"))
+
+
+def test_site_quant_translates_protein_group_to_accession():
+    """v0.5.3.1: site_quant maps full Sage Protein.Group to bare accession before FASTA lookup."""
+    from diaquant.quantify import site_quant
+    from diaquant.parse_sage import _extract_accession
+
+    protein_seq = "MKAAASTPEPTIDEKXXXSTR"
+    peptide = "AAASTPEPTIDEK"
+
+    long_df = pd.DataFrame({
+        "filename": ["s1.mzML", "s2.mzML"],
+        # Note: full Sage tag, not bare accession.
+        "Protein.Group": ["sp|P1|TEST_HUMAN", "sp|P1|TEST_HUMAN"],
+        "Genes": ["TEST", "TEST"],
+        "Stripped.Sequence": [peptide, peptide],
+        "Modified.Sequence": [peptide, peptide],
+        "Precursor.Id": [peptide + "2", peptide + "2"],
+        "Intensity": [1e6, 2e6],
+        "PTM.Site.Positions": ["S4", "S4"],
+        "PTM.Modification": ["+79.9663", "+79.9663"],
+        "Best.Site.Probability": [0.99, 0.98],
+    })
+    long_df.attrs["fasta_records"] = {
+        "P1": {"name": "TEST_HUMAN", "gene": "TEST",
+               "descr": "test", "seq": protein_seq}
+    }
+    long_df.attrs["protein_group_accession"] = _extract_accession
+
+    site_lfq = site_quant(long_df, min_samples=1, localization_cutoff=0.75)
+    assert not site_lfq.empty, (
+        "Pre-fix: this returned empty because fasta_records['sp|P1|TEST_HUMAN'] missed."
+    )
+    # _abs_site_keys uses the *accession* as the first key field.
+    key = site_lfq["protein"].iloc[0]
+    assert key.startswith("P1|TEST|S6|"), key
+    assert "_local" not in key, "Should resolve to absolute position, not _local fallback"

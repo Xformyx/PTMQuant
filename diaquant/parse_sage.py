@@ -133,6 +133,37 @@ def load_fasta_records(fasta: Path) -> dict:
     return records
 
 
+_PROTEIN_GROUP_ACC_RE = re.compile(r"^(?:[a-z]{2}\|)?([A-Za-z0-9._-]+)")
+
+
+def _extract_accession(protein_group: str) -> str:
+    """Return the bare UniProt accession from a ``Protein.Group`` cell.
+
+    Sage emits ``sp|P12345|GENE_HUMAN`` style identifiers in ``Protein.Group``,
+    while :func:`load_fasta_records` keys its dict on the bare accession
+    (``P12345``).  v0.5.3 (and v0.5.2) accidentally looked up the full
+    ``sp|...|...`` string against that dict and silently filled every Genes /
+    Protein.Names / First.Protein.Description cell with an empty string
+    — and the v0.5.3 site-matrix roll-up additionally lost every row because
+    ``fasta_records[Protein.Group]`` always missed.  This helper normalises
+    the lookup key so both the precursor matrix metadata join *and* the site
+    matrix absolute-position resolver work for UniProt-style FASTAs.
+
+    Decoy entries are emitted by Sage as ``rev_sp|P12345|GENE_HUMAN``; the
+    leading ``rev_`` is stripped so decoys still join to their target FASTA
+    record (callers usually drop decoys upstream, but we keep the join lossless
+    in case they don't).
+    """
+    if not isinstance(protein_group, str) or not protein_group:
+        return ""
+    pg = protein_group[4:] if protein_group.startswith("rev_") else protein_group
+    # Protein.Group can carry multiple semicolon-delimited accessions for
+    # protein groups; we use the first one as the representative for metadata.
+    pg = pg.split(";")[0]
+    m = _PROTEIN_GROUP_ACC_RE.match(pg)
+    return m.group(1) if m else pg
+
+
 def attach_fasta_meta(df: pd.DataFrame, fasta: Path) -> pd.DataFrame:
     """Fill Genes / Protein.Names / First.Protein.Description from a UniProt FASTA.
 
@@ -142,14 +173,19 @@ def attach_fasta_meta(df: pd.DataFrame, fasta: Path) -> pd.DataFrame:
     """
     records = load_fasta_records(fasta)
 
-    def fill(row, key, default=""):
-        return records.get(row["Protein.Group"], {}).get(key, default)
+    # Vectorised accession extraction — the per-row apply() in v0.5.3 not only
+    # masked the lookup-key bug but was also a perf hot spot on large pr_matrix.
+    accessions = df["Protein.Group"].map(_extract_accession)
 
-    df["Protein.Names"] = df.apply(lambda r: fill(r, "name"), axis=1)
-    df["Genes"] = df.apply(lambda r: fill(r, "gene"), axis=1)
-    df["First.Protein.Description"] = df.apply(
-        lambda r: fill(r, "descr"), axis=1
-    )
-    # Stash records so site_quant() can look up sequences without re-parsing.
+    def _col(field: str) -> pd.Series:
+        return accessions.map(lambda a: records.get(a, {}).get(field, ""))
+
+    df["Protein.Names"] = _col("name")
+    df["Genes"] = _col("gene")
+    df["First.Protein.Description"] = _col("descr")
+    # Stash records *and* the accession map so site_quant() can look up
+    # sequences without re-parsing the FASTA *and* without re-parsing the
+    # Protein.Group string for every site.
     df.attrs["fasta_records"] = records
+    df.attrs["protein_group_accession"] = _extract_accession
     return df

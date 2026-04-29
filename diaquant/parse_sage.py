@@ -50,7 +50,7 @@ def parse_sage_tsv(path: Path,
     # Force all object-like columns to native Python dtypes so string
     # operations work regardless of whether pandas uses Arrow or numpy backing.
     df = df.copy()
-    for col in df.select_dtypes(include=["object", "str"]).columns:
+    for col in df.select_dtypes(include=["object"]).columns:
         try:
             df[col] = df[col].astype(str).where(df[col].notna(), other=pd.NA)
         except Exception:

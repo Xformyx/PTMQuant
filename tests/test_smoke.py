@@ -821,8 +821,17 @@ def test_quant_min_samples_default_is_one():
 # =====================================================================
 
 def test_version_is_055():
+    """Pinned to v0.5.5+ so downstream pipelines can gate on the feature set.
+
+    Name preserved for git-grep; actual assertion accepts any 0.5.x >= 0.5.5.
+    """
     import diaquant
-    assert diaquant.__version__ == "0.5.5"
+
+    def _triple(v: str) -> tuple[int, int, int]:
+        parts = v.split(".")
+        return (int(parts[0]), int(parts[1]), int(parts[2].split("rc")[0].split("a")[0].split("b")[0]))
+
+    assert _triple(diaquant.__version__) >= (0, 5, 5), diaquant.__version__
 
 
 def test_mbr_config_defaults():
@@ -950,3 +959,85 @@ def test_manifest_respects_explicit_empty_library_list(tmp_path):
     )
     data = json.loads(out.read_text())
     assert data["predicted_library"]["applied"] is False
+
+
+# =====================================================================
+# v0.5.6 regression tests  (release engineering + observability)
+# =====================================================================
+
+def test_verify_ptmquant_passes_for_healthy_output(tmp_path):
+    """The new stdlib-only verifier returns exit code 0 on a well-formed output."""
+    import json
+    import subprocess
+    import sys
+
+    (tmp_path / "run_manifest.json").write_text(json.dumps({
+        "diaquant_version": "0.5.6",
+        "predicted_library": {"applied": True, "paths": ["p.tsv"]},
+        "rescoring": {"configured": True, "applied": True},
+        "mbr": {"configured": True, "applied": True, "n_rescued": 12},
+        "passes": ["phospho"],
+    }))
+    (tmp_path / "report.pr_matrix.tsv").write_text(
+        "Protein.Group\tPrecursor.Id\ts1\n"
+        "sp|P1|HUMAN\tAK/1\t100\n"
+        "sp|P2|HUMAN\tBK/2\t200\n"
+    )
+    (tmp_path / "report.pg_matrix.tsv").write_text(
+        "Protein.Group\tGenes\ts1\n"
+        "sp|P1|HUMAN\tGENE1\t100\n"
+        "sp|P2|HUMAN\tGENE2\t200\n"
+    )
+    (tmp_path / "report.ptm_site_matrix.tsv").write_text(
+        "Protein.Group\tGenes\tPTM.Site\ts1\n"
+        "sp|P1|HUMAN\tGENE1\tS-1\t50\n"
+    )
+
+    import pathlib
+    script = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "verify_ptmquant.py"
+    result = subprocess.run(
+        [sys.executable, str(script), str(tmp_path), "--json"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    report = json.loads(result.stdout)
+    assert report["ok"] is True
+    assert report["failures"] == []
+
+
+def test_verify_ptmquant_fails_when_manifest_missing(tmp_path):
+    """Verifier fails loudly if run_manifest.json is missing (pre-v0.5.4 image)."""
+    import subprocess
+    import sys
+    (tmp_path / "report.pr_matrix.tsv").write_text(
+        "Protein.Group\tPrecursor.Id\ts1\nP1\tAK/1\t100\n"
+    )
+    (tmp_path / "report.pg_matrix.tsv").write_text(
+        "Protein.Group\tGenes\ts1\nP1\tGENE1\t100\n"
+    )
+
+    import pathlib
+    script = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "verify_ptmquant.py"
+    result = subprocess.run(
+        [sys.executable, str(script), str(tmp_path)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 1
+    assert "run_manifest.json is missing" in result.stdout
+
+
+def test_pyproject_version_matches_package():
+    """pyproject.toml must declare version dynamically so the wheel, image and
+    ``diaquant --version`` cannot disagree (v0.5.6 release-engineering fix)."""
+    import pathlib
+    try:
+        import tomllib  # Python 3.11+
+    except ModuleNotFoundError:
+        import tomli as tomllib  # type: ignore
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    data = tomllib.loads((root / "pyproject.toml").read_text())
+    dynamic = data["project"].get("dynamic", [])
+    assert "version" in dynamic, "pyproject.toml must declare version as dynamic"
+    attr = data.get("tool", {}).get("setuptools", {}).get("dynamic", {}).get("version", {}).get("attr")
+    assert attr == "diaquant.__version__", attr

@@ -1,0 +1,135 @@
+name: docker-publish
+
+# Builds and publishes the PTMQuant (diaquant) container image to GitHub
+# Container Registry whenever:
+#   * a v*.*.* tag is pushed (release build -> pushed with the exact
+#     version tag AND updates :latest),
+#   * a commit lands on main (rolling build -> pushed as :main only),
+#   * or the workflow is triggered manually (no push, useful for
+#     smoke-testing Dockerfile changes).
+#
+# Downstream (PTM-platform) consumes the image with:
+#
+#   docker pull ghcr.io/xformyx/ptmquant:latest
+#   docker tag  ghcr.io/xformyx/ptmquant:latest ptmquant:latest
+#
+# so local references to `ptmquant:latest` keep working unchanged.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      push_to_registry:
+        description: "Push resulting image to GHCR?"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      REGISTRY: ghcr.io
+      # GHCR namespaces are case-sensitive and must be lowercase.
+      IMAGE_NAME: ${{ github.repository_owner }}/ptmquant
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # Docker Buildx gives us layer caching + multi-arch support.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: >-
+          github.event_name == 'push' ||
+          (github.event_name == 'workflow_dispatch' &&
+           inputs.push_to_registry == 'true')
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lowercase repository owner (for GHCR path)
+        id: owner
+        run: |
+          echo "lc=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Derive diaquant version from __init__.py
+        id: dq
+        run: |
+          version=$(python3 - <<'PY'
+          import re, pathlib
+          text = pathlib.Path("diaquant/__init__.py").read_text()
+          m = re.search(r'^__version__\s*=\s*"([^"]+)"', text, re.M)
+          if not m:
+              raise SystemExit("cannot find __version__ in diaquant/__init__.py")
+          print(m.group(1))
+          PY
+          )
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Derived diaquant version: $version"
+
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.lc }}/ptmquant
+          # - semver tags (v0.5.6) generate :0.5.6 + :0.5 + :latest
+          # - branch builds generate :main
+          # - manually-triggered builds generate :manual-<sha>
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=raw,value=manual-${{ github.sha }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          # Only push when the event actually wants to publish; manual dispatch
+          # with push_to_registry=false still builds for validation.
+          push: >-
+            ${{
+              github.event_name == 'push' ||
+              (github.event_name == 'workflow_dispatch' &&
+               inputs.push_to_registry == 'true')
+            }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Propagate the derived version + git SHA into OCI labels so
+          # `docker inspect` surfaces what is running.
+          build-args: |
+            DIAQUANT_VERSION=${{ steps.dq.outputs.version }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp || github.run_id }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Print image summary
+        if: >-
+          github.event_name == 'push' ||
+          (github.event_name == 'workflow_dispatch' &&
+           inputs.push_to_registry == 'true')
+        run: |
+          echo "Published image tags:"
+          echo "${{ steps.meta.outputs.tags }}"
+          echo ""
+          echo "Pull with:"
+          echo "  docker pull ${{ env.REGISTRY }}/${{ steps.owner.outputs.lc }}/ptmquant:latest"
+          echo ""
+          echo "Retag for PTM-platform:"
+          echo "  docker tag ${{ env.REGISTRY }}/${{ steps.owner.outputs.lc }}/ptmquant:latest ptmquant:latest"

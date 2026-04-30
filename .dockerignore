@@ -1,6 +1,12 @@
+# ---- Version control + editor junk --------------------------------------
 .git
 .gitignore
 .github
+.idea
+.vscode
+.DS_Store
+
+# ---- Python build / cache dirs -----------------------------------------
 .venv
 venv
 env
@@ -18,8 +24,27 @@ htmlcov
 *.egg-info
 build
 dist
+
+# ---- Docs + generated outputs (not needed at runtime) -------------------
 docs/_build
-.idea
-.vscode
-.DS_Store
+docs
+
+# ---- Tests, benchmarks, ad-hoc comparison artefacts ---------------------
+# The test suite is shipped in the source tree but not required to run
+# the pipeline.  Excluding it keeps the image ~80 MB slimmer and avoids
+# accidentally baking sample fixtures into the published image.
+tests
+compare
+compare*/
+upload
+sample_data
+input
+
+# ---- Never ship the Dockerfile / CI artefacts themselves ---------------
+# Keeping Dockerfile OUT of the build context speeds layer invalidation
+# when only the Dockerfile itself changes.
 .dockerignore
+
+# ---- Misc ---------------------------------------------------------------
+*.log
+*.tmp

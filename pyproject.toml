@@ -4,7 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "diaquant"
-version = "0.5.1"
+# Version is kept single-source-of-truth in diaquant/__init__.py::__version__.
+# The Dockerfile, GHCR release workflow, and run_manifest.json all read this
+# same value, so bumping __version__ is the only place to edit the release
+# number.  ``version`` is declared as dynamic below and wired via
+# [tool.setuptools.dynamic].
+dynamic = ["version"]
 description = "Open-source DIA proteomics quantification pipeline with universal PTM support (Sage + directLFQ + AlphaPeptDeep)"
 authors = [{name = "Manus AI"}]
 license = {text = "Apache-2.0"}
@@ -34,3 +39,6 @@ diaquant = "diaquant.cli:cli"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["diaquant*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "diaquant.__version__"}

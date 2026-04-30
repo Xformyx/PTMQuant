@@ -31,6 +31,29 @@ Modules:
                       stub manifest on exception
 - cli:                click-based command-line interface
 
+v0.5.6 changes (the "release engineering" release):
+  * Dockerfile hardened: non-root ``ptmq`` user (uid 1000), OCI labels
+    carrying ``org.opencontainers.image.version == __version__``, HEALTH-
+    CHECK exercising ``diaquant --version``, shared predicted-library
+    cache mounted at ``/cache/predicted_libs`` matching the
+    ``PTMQUANT_LIB_CACHE_DIR`` default, ``PEPTDEEP_STRICT`` build arg,
+    and ``/etc/ptmquant/peptdeep_status.txt`` recording whether the
+    pretrained models were baked in.
+  * ``pyproject.toml`` now reads ``version`` dynamically from
+    ``diaquant.__version__`` so the image / wheel / ``diaquant
+    --version`` / ``run_manifest.json`` cannot disagree.
+  * New GHCR publishing workflow (``.github/workflows/docker-publish``)
+    builds and pushes ``ghcr.io/xformyx/ptmquant:<version>`` plus
+    ``:latest`` on every ``v*.*.*`` tag, so re-running the pipeline
+    after a release is a single ``docker pull``.
+  * New ``scripts/verify_ptmquant.py``: stdlib-only post-hoc verifier
+    that checks ``run_manifest.json`` exists, the diaquant version
+    advertised inside it is recent enough, Genes are populated in
+    ``pg_matrix``, ``pg_matrix`` covers a sensible fraction of
+    ``pr_matrix`` accessions, and (advisory) MBR / predicted-library
+    / ptm_site_matrix are healthy.  Returns exit codes suitable for
+    CI gating.
+
 v0.5.5 changes (the "observability + PTM" release):
   P0-A. ptm_site_matrix 0-rows bug fixed.  ``add_site_probabilities`` now
         records per-mod positions (``PTM.Mods`` dict) and normalises mass
@@ -47,4 +70,4 @@ v0.5.5 changes (the "observability + PTM" release):
         ``pass_phospho/`` / cache dir so multi-pass outputs are visible.
 """
 
-__version__ = "0.5.5"
+__version__ = "0.5.6"

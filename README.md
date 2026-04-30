@@ -315,3 +315,64 @@ respected ("we checked, none produced") to avoid false positives.
 `rt_align_per_pass_phospho`, `rt_align_pred_rt_tol_min`.
 
 **Tests:** 53 passing (7 new v0.5.5 regression tests).
+
+
+
+---
+
+## v0.5.6 (release engineering)
+
+v0.5.6 doesn't add algorithmic features — it fixes the *delivery path* so that
+future releases actually reach users' containers.  The preceding three releases
+(v0.5.3 → v0.5.5) all shipped correct code to this repository, but the
+downstream `ptmquant:latest` image was never rebuilt, so on-cluster pipelines
+kept running pre-v0.5.3 binaries.  This release closes that gap.
+
+### What's new
+
+**Dockerfile hardening**
+Dynamic version (`org.opencontainers.image.version == diaquant.__version__`),
+non-root `ptmq` user (uid 1000, matches typical host uid), `HEALTHCHECK`
+exercising `diaquant --version`, a shared predicted-library cache volume at
+`/cache/predicted_libs` wired to `PTMQUANT_LIB_CACHE_DIR`, a `PEPTDEEP_STRICT`
+build arg for reproducible CI builds, and `/etc/ptmquant/peptdeep_status.txt`
+recording whether the pretrained AlphaPeptDeep models were baked into the
+image.
+
+**Single-source-of-truth versioning**
+`pyproject.toml` now declares `dynamic = ["version"]` with
+`[tool.setuptools.dynamic] version = {attr = "diaquant.__version__"}`,
+so the wheel, the image OCI label, `diaquant --version`, and
+`run_manifest.json` can no longer disagree.  Bumping `diaquant/__init__.py`
+is the only edit needed to cut a release.
+
+**GHCR publish workflow**
+`.github/workflows/docker-publish.yml` builds and pushes
+`ghcr.io/xformyx/ptmquant:<version>` + `:latest` on every `v*.*.*` tag, and
+`:main` on every commit to `main`.  Users upgrade with a single
+`docker pull ghcr.io/xformyx/ptmquant:latest` instead of manually rebuilding.
+
+**Output verifier**
+New `scripts/verify_ptmquant.py` (stdlib-only) reads `run_manifest.json`,
+checks the diaquant version advertised inside it is recent enough, validates
+that `pg_matrix.Genes` is populated and that `pg_matrix` covers a reasonable
+fraction of `pr_matrix` accessions, and emits advisories when MBR /
+predicted-library / `ptm_site_matrix` are degraded.  Returns shell exit codes
+suitable for CI gating; also has a `--json` mode for programmatic use.
+
+### User migration
+
+```bash
+# 1.  Pull the new pre-built image
+docker pull ghcr.io/xformyx/ptmquant:latest
+docker tag  ghcr.io/xformyx/ptmquant:latest ptmquant:latest
+
+# 2.  Re-run your PTMQuant job (PTM-platform picks up the new image)
+#     ...
+
+# 3.  Verify the output dir before downstream analysis
+python3 scripts/verify_ptmquant.py /path/to/output_dir
+# -> exit 0 = PASS, 1 = failed checks, 2 = unusable output dir
+```
+
+**Tests:** 56 passing (3 new v0.5.6 regression tests).

@@ -196,6 +196,13 @@ class DiaQuantConfig:
     # Typical value: 5.0 min for a 90-min LC gradient.
     rt_prediction_tolerance_min: Optional[float] = 5.0
 
+    # ---- v0.5.7 (P2-1): precursor-matrix sample normalization ----
+    # When True (default), ``report.pr_matrix.tsv`` is written after a
+    # directLFQ NormalizationManager pass that equalises per-sample medians
+    # in log-space.  Set to False to fall back to raw apex area as in
+    # v0.5.6.  The pg_matrix and site_matrix paths are always normalised.
+    normalize_precursor_matrix: bool = True
+
     # ---- runtime ----
     threads: int = 0                        # 0 = autodetect
     sage_binary: str = "sage"

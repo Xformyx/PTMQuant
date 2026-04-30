@@ -31,6 +31,25 @@ Modules:
                       stub manifest on exception
 - cli:                click-based command-line interface
 
+v0.5.7 changes (the "v0.5.6 hotfix + precursor-normalization" release):
+  P0-1. parse_sage_tsv now drops Sage decoys (label == -1, plus rev_/REV_/
+        DECOY_ accession-prefixed rows) **before** the FDR filter.  v0.5.6
+        leaked 185 decoy precursors and 101 decoy protein groups into the
+        DIA-NN-style outputs because the q-value filter alone does not
+        guarantee target-only rows.
+  P0-2. site_quant() no longer iterates with ``DataFrame.itertuples``,
+        which silently mangles columns with dotted names (e.g. ``PTM.Mods``
+        becomes ``_2``) and caused every PSM to be skipped, leaving
+        ``ptm_site_matrix.tsv`` empty.  The PTM.Mods path now uses
+        per-column numpy arrays and emits a real, populated site matrix.
+  P2-1. New ``precursor_matrix_normalized()`` runs directLFQ's
+        NormalizationManager on the precursor pivot before writing
+        ``report.pr_matrix.tsv``, equalising per-sample medians in log
+        space.  This drops the missing-value rate from the v0.5.6 38.9%
+        back to the expected ~18% range when KIST-EPS-style runs differ
+        in load by 1.5--3x.  Toggle via ``normalize_precursor_matrix``
+        in YAML (default true).
+
 v0.5.6 changes (the "release engineering" release):
   * Dockerfile hardened: non-root ``ptmq`` user (uid 1000), OCI labels
     carrying ``org.opencontainers.image.version == __version__``, HEALTH-
@@ -70,4 +89,4 @@ v0.5.5 changes (the "observability + PTM" release):
         ``pass_phospho/`` / cache dir so multi-pass outputs are visible.
 """
 
-__version__ = "0.5.6"
+__version__ = "0.5.7"

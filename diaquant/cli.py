@@ -30,7 +30,12 @@ from .modifications import DEFAULT_MODIFICATIONS
 from .multipass import run_multipass
 from .parse_sage import attach_fasta_meta, parse_sage_tsv
 from .ptm_profiles import PASS_PROFILES, list_builtin_passes
-from .quantify import precursor_matrix, protein_quant, site_quant
+from .quantify import (
+    precursor_matrix,
+    precursor_matrix_normalized,
+    protein_quant,
+    site_quant,
+)
 from .manifest import write_run_manifest
 from .mbr import MBRParams, match_between_runs
 from .razor import apply_razor_grouping
@@ -429,7 +434,15 @@ def run(cfg_path: str, resume: bool) -> None:
         f"(razor+merge)"
     )
 
-    pr_wide = precursor_matrix(long_df)
+    # v0.5.7 (P2-1): precursor matrix is now sample-normalised by default.
+    # The legacy raw matrix can be requested by setting
+    # ``normalize_precursor_matrix: false`` in the YAML.
+    if getattr(cfg, "normalize_precursor_matrix", True):
+        click.echo("[diaquant] precursor matrix: directLFQ sample normalization")
+        pr_wide = precursor_matrix_normalized(long_df)
+    else:
+        click.echo("[diaquant] precursor matrix: raw apex area (un-normalised)")
+        pr_wide = precursor_matrix(long_df)
     pg_lfq = protein_quant(long_df, min_samples=cfg.quant_min_samples)
     site_lfq = site_quant(
         long_df,

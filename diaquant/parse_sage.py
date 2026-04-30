@@ -82,16 +82,34 @@ def parse_sage_tsv(path: Path,
     df["Precursor.Id"] = (df["Modified.Sequence"].astype(str)
                           + df["Precursor.Charge"].astype(str))
 
-    # keep a copy of the pre-FDR table for MBR (v0.5.5 donor pool)
+    # ---- v0.5.7 (P0-1): drop decoys *before* FDR filter ----
+    # Sage emits decoy PSMs with ``label == -1`` AND ``proteins`` prefixed by
+    # ``rev_``.  v0.5.6 only filtered on Peptide.Q.Value, so any decoy that
+    # happened to pass the q-cut leaked into pr_matrix / pg_matrix
+    # (185 / 101 rows on the KBSI benchmark).  We now drop decoys explicitly
+    # using the more reliable ``label`` column when present and fall back to
+    # the ``rev_`` accession prefix otherwise.
+    import logging
+    _log = logging.getLogger(__name__)
+    n_before_decoy = len(df)
+    if "label" in df.columns:
+        decoy_mask = pd.to_numeric(df["label"], errors="coerce").fillna(1) < 0
+    else:
+        decoy_mask = (df["Protein.Group"].astype(str)
+                        .str.startswith(("rev_", "REV_", "DECOY_", "decoy_")))
+    n_decoy = int(decoy_mask.sum())
+    df = df[~decoy_mask].copy()
+    _log.info("decoy filter: dropped %d / %d PSMs", n_decoy, n_before_decoy)
+    # keep a copy of the pre-FDR table for MBR (v0.5.5 donor pool); decoys
+    # are also dropped from the donor pool so MBR cannot rescue a decoy.
     df_full = df.copy()
-
     # filter: target hits at configured peptide FDR
     if "Peptide.Q.Value" in df.columns:
         before = len(df)
         df = df[df["Peptide.Q.Value"] <= peptide_fdr]
-        import logging
-        logging.getLogger(__name__).info(
-            "FDR filter (peptide_q \u2264 %.3f): %d \u2192 %d PSMs", peptide_fdr, before, len(df)
+        _log.info(
+            "FDR filter (peptide_q \u2264 %.3f): %d \u2192 %d PSMs",
+            peptide_fdr, before, len(df),
         )
 
     # PTM site localization (v0.5.5: per-mod PTM.Mods + per-site probabilities)

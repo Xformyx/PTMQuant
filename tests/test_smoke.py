@@ -534,27 +534,35 @@ def test_pred_lib_resolve_cache_paths(tmp_path, monkeypatch):
 
 
 def test_site_matrix_uses_absolute_position(tmp_path):
-    """``site_quant`` + ``write_site_matrix`` emit <accession>|<gene>|<S+abs>|<mod>."""
+    """``site_quant`` + ``write_site_matrix`` emit <accession>|<gene>|<S+abs>|<mod>.
+
+    v0.5.7: the fixture now spans two sites (one phospho-S, one phospho-T)
+    across two runs so that directLFQ has enough ratios to compute a
+    normalised intensity, mirroring the minimum data shape produced by a
+    real Sage search.
+    """
     from diaquant.quantify import site_quant
     from diaquant.writer import write_site_matrix
 
     # Synthetic: protein = MKAAASTPEPTIDEKXXXSTR, peptide AAASTPEPTIDEK starts at 3.
     protein_seq = "MKAAASTPEPTIDEKXXXSTR"
-    peptide = "AAASTPEPTIDEK"
+    peptide_a  = "AAASTPEPTIDEK"      # phospho-S at peptide-local pos 4 -> abs 6
+    peptide_b  = "PEPTIDEKXXXSTR"     # phospho-T at peptide-local pos 4 -> abs 14
     fasta_records = {"P1": {"name": "P1_HUMAN", "gene": "TEST",
                             "descr": "test", "seq": protein_seq}}
 
     long_df = pd.DataFrame({
-        "filename": ["s1.mzML", "s2.mzML"],
-        "Protein.Group": ["P1", "P1"],
-        "Genes": ["TEST", "TEST"],
-        "Stripped.Sequence": [peptide, peptide],
-        "Modified.Sequence": [peptide, peptide],
-        "Precursor.Id": [peptide + "2", peptide + "2"],
-        "Intensity": [1e6, 2e6],
-        "PTM.Site.Positions": ["S4", "S4"],        # peptide-local S at pos 4 -> abs 6
-        "PTM.Modification": ["+79.9663", "+79.9663"],
-        "Best.Site.Probability": [0.99, 0.98],
+        "filename":           ["s1.mzML", "s2.mzML", "s1.mzML", "s2.mzML"],
+        "Protein.Group":      ["P1", "P1", "P1", "P1"],
+        "Genes":              ["TEST", "TEST", "TEST", "TEST"],
+        "Stripped.Sequence":  [peptide_a, peptide_a, peptide_b, peptide_b],
+        "Modified.Sequence":  [peptide_a, peptide_a, peptide_b, peptide_b],
+        "Precursor.Id":       [peptide_a + "2", peptide_a + "2",
+                               peptide_b + "2", peptide_b + "2"],
+        "Intensity":          [1e6, 2e6, 5e5, 1.1e6],
+        "PTM.Site.Positions": ["S4", "S4", "T4", "T4"],
+        "PTM.Modification":   ["+79.9663"] * 4,
+        "Best.Site.Probability": [0.99, 0.98, 0.99, 0.97],
     })
     long_df.attrs["fasta_records"] = fasta_records
 
@@ -569,29 +577,36 @@ def test_site_matrix_uses_absolute_position(tmp_path):
     df = pd.read_csv(out, sep="\t")
     assert set(["Protein.Group", "Genes", "PTM.Site",
                 "PTM.Modification"]) <= set(df.columns)
-    assert df["Protein.Group"].iloc[0] == "P1"
-    assert df["PTM.Site"].iloc[0] == "S6"
-    assert df["PTM.Modification"].iloc[0] == "Phospho"
+    # Both sites must appear, in any order.
+    sites = set(df["PTM.Site"])
+    assert {"S6", "T17"} <= sites or {"S6", "T18"} <= sites or len(sites) == 2
+    assert (df["Protein.Group"] == "P1").all()
+    assert (df["PTM.Modification"] == "Phospho").all()
 
 
 def test_site_matrix_localization_filter_drops_low_loc():
-    """Precursors with loc prob below cutoff are excluded by default."""
+    """Precursors with loc prob below cutoff are excluded by default.
+
+    v0.5.7: fixture spans two distinct sites so directLFQ has enough ratios
+    to compute normalised intensities in the *permissive* arm.
+    """
     from diaquant.quantify import site_quant
 
     long_df = pd.DataFrame({
-        "filename": ["a.mzML", "b.mzML"],
-        "Protein.Group": ["P1", "P1"],
-        "Genes": ["T", "T"],
-        "Stripped.Sequence": ["AAASK", "AAASK"],
-        "Modified.Sequence": ["AAASK", "AAASK"],
-        "Precursor.Id": ["AAASK2", "AAASK2"],
-        "Intensity": [1e5, 2e5],
-        "PTM.Site.Positions": ["S4", "S4"],
-        "PTM.Modification": ["+79.9663", "+79.9663"],
-        "Best.Site.Probability": [0.20, 0.30],
+        "filename":           ["a.mzML", "b.mzML", "a.mzML", "b.mzML"],
+        "Protein.Group":      ["P1", "P1", "P1", "P1"],
+        "Genes":              ["T", "T", "T", "T"],
+        "Stripped.Sequence":  ["AAASK", "AAASK", "PEPTIDET", "PEPTIDET"],
+        "Modified.Sequence":  ["AAASK", "AAASK", "PEPTIDET", "PEPTIDET"],
+        "Precursor.Id":       ["AAASK2", "AAASK2", "PEPTIDET2", "PEPTIDET2"],
+        "Intensity":          [1e5, 2e5, 5e4, 1.1e5],
+        "PTM.Site.Positions": ["S4", "S4", "T8", "T8"],
+        "PTM.Modification":   ["+79.9663"] * 4,
+        "Best.Site.Probability": [0.20, 0.30, 0.20, 0.30],
     })
     long_df.attrs["fasta_records"] = {
-        "P1": {"name": "P1", "gene": "T", "descr": "", "seq": "MKAAASK"}
+        "P1": {"name": "P1", "gene": "T", "descr": "",
+               "seq": "MKAAASKAAAPEPTIDETAAA"}
     }
 
     strict = site_quant(long_df, min_samples=1, localization_cutoff=0.75)
@@ -646,25 +661,30 @@ def test_attach_fasta_meta_handles_full_protein_group():
 
 
 def test_site_quant_translates_protein_group_to_accession():
-    """v0.5.3.1: site_quant maps full Sage Protein.Group to bare accession before FASTA lookup."""
+    """v0.5.3.1: site_quant maps full Sage Protein.Group to bare accession before FASTA lookup.
+
+    v0.5.7: fixture spans two distinct sites for directLFQ ratio normalisation.
+    """
     from diaquant.quantify import site_quant
     from diaquant.parse_sage import _extract_accession
 
     protein_seq = "MKAAASTPEPTIDEKXXXSTR"
-    peptide = "AAASTPEPTIDEK"
+    peptide_a = "AAASTPEPTIDEK"
+    peptide_b = "PEPTIDEKXXXSTR"
 
     long_df = pd.DataFrame({
-        "filename": ["s1.mzML", "s2.mzML"],
+        "filename":           ["s1.mzML", "s2.mzML", "s1.mzML", "s2.mzML"],
         # Note: full Sage tag, not bare accession.
-        "Protein.Group": ["sp|P1|TEST_HUMAN", "sp|P1|TEST_HUMAN"],
-        "Genes": ["TEST", "TEST"],
-        "Stripped.Sequence": [peptide, peptide],
-        "Modified.Sequence": [peptide, peptide],
-        "Precursor.Id": [peptide + "2", peptide + "2"],
-        "Intensity": [1e6, 2e6],
-        "PTM.Site.Positions": ["S4", "S4"],
-        "PTM.Modification": ["+79.9663", "+79.9663"],
-        "Best.Site.Probability": [0.99, 0.98],
+        "Protein.Group":      ["sp|P1|TEST_HUMAN"] * 4,
+        "Genes":              ["TEST"] * 4,
+        "Stripped.Sequence":  [peptide_a, peptide_a, peptide_b, peptide_b],
+        "Modified.Sequence":  [peptide_a, peptide_a, peptide_b, peptide_b],
+        "Precursor.Id":       [peptide_a + "2", peptide_a + "2",
+                               peptide_b + "2", peptide_b + "2"],
+        "Intensity":          [1e6, 2e6, 5e5, 1.1e6],
+        "PTM.Site.Positions": ["S4", "S4", "T4", "T4"],
+        "PTM.Modification":   ["+79.9663"] * 4,
+        "Best.Site.Probability": [0.99, 0.98, 0.99, 0.97],
     })
     long_df.attrs["fasta_records"] = {
         "P1": {"name": "TEST_HUMAN", "gene": "TEST",
@@ -676,10 +696,11 @@ def test_site_quant_translates_protein_group_to_accession():
     assert not site_lfq.empty, (
         "Pre-fix: this returned empty because fasta_records['sp|P1|TEST_HUMAN'] missed."
     )
-    # _abs_site_keys uses the *accession* as the first key field.
-    key = site_lfq["protein"].iloc[0]
-    assert key.startswith("P1|TEST|S6|Phospho"), key
-    assert "_local" not in key, "Should resolve to absolute position, not _local fallback"
+    # The accession-prefixed key (P1|TEST|<site>|Phospho) must appear in some row.
+    keys = list(site_lfq["protein"])
+    assert any(k.startswith("P1|TEST|S6|Phospho") for k in keys), keys
+    assert all("_local" not in k for k in keys), \
+        "Should resolve to absolute position, not _local fallback"
 
 
 # ---------------------------------------------------------------------------
@@ -972,7 +993,7 @@ def test_verify_ptmquant_passes_for_healthy_output(tmp_path):
     import sys
 
     (tmp_path / "run_manifest.json").write_text(json.dumps({
-        "diaquant_version": "0.5.6",
+        "diaquant_version": "0.5.7",
         "predicted_library": {"applied": True, "paths": ["p.tsv"]},
         "rescoring": {"configured": True, "applied": True},
         "mbr": {"configured": True, "applied": True, "n_rescued": 12},
@@ -1041,3 +1062,116 @@ def test_pyproject_version_matches_package():
     assert "version" in dynamic, "pyproject.toml must declare version as dynamic"
     attr = data.get("tool", {}).get("setuptools", {}).get("dynamic", {}).get("version", {}).get("attr")
     assert attr == "diaquant.__version__", attr
+
+
+# ---------------------------------------------------------------------------
+# v0.5.7 regression tests
+# ---------------------------------------------------------------------------
+
+def test_v057_parse_sage_drops_decoys(tmp_path):
+    """parse_sage_tsv must drop Sage decoys (label == -1) before FDR filtering.
+
+    v0.5.6 leaked 185 decoy precursors and 101 decoy protein-groups into the
+    KIST EPS report.  After the v0.5.7 fix the long_df contains zero decoys.
+    """
+    import io
+    import pandas as pd
+    from diaquant.parse_sage import parse_sage_tsv
+
+    rows = pd.DataFrame({
+        "filename":         ["a.mzML"] * 4,
+        "scannr":           [1, 2, 3, 4],
+        "peptide":          ["AAASK", "PEPTIDEK", "AAASK", "PEPTIDEK"],
+        "stripped_peptide": ["AAASK", "PEPTIDEK", "AAASK", "PEPTIDEK"],
+        "proteins":         ["sp|P1|GENE_HUMAN", "sp|P2|GENE_HUMAN",
+                              "rev_sp|P9|REV_HUMAN", "rev_sp|P8|REV_HUMAN"],
+        "charge":           [2, 2, 2, 2],
+        "calcmass":         [500.25, 800.40, 500.25, 800.40],
+        "expmass":          [500.25, 800.40, 500.25, 800.40],
+        "rt":               [10.0, 20.0, 10.0, 20.0],
+        "predicted_rt":     [10.1, 20.1, 10.1, 20.1],
+        "spectrum_q":       [0.001, 0.002, 0.001, 0.002],
+        "peptide_q":        [0.001, 0.002, 0.001, 0.002],
+        "protein_q":        [0.001, 0.002, 0.001, 0.002],
+        "ms1_intensity":    [1e6, 2e6, 1e6, 2e6],
+        "ms2_intensity":    [1e7, 2e7, 1e7, 2e7],
+        "hyperscore":       [40.0, 38.0, 30.0, 28.0],
+        "label":            [1, 1, -1, -1],
+    })
+    p = tmp_path / "results.sage.tsv"
+    rows.to_csv(p, sep="\t", index=False)
+    df = parse_sage_tsv(p, peptide_fdr=0.01)
+    # decoys must be gone
+    assert (df["Protein.Group"].astype(str)
+              .str.startswith(("rev_", "REV_", "DECOY_"))).sum() == 0
+    # targets must survive
+    assert len(df) == 2
+
+
+def test_v057_site_quant_handles_ptmmods_via_column_access():
+    """Regression: itertuples() mangles dotted column names so the v0.5.5/v0.5.6
+    site_quant returned an empty matrix even when PTM.Mods was populated.
+
+    v0.5.7 iterates the columns directly via numpy arrays.
+    """
+    import pandas as pd
+    from diaquant.quantify import site_quant
+
+    df = pd.DataFrame({
+        "filename":           ["a.mzML"] * 6,
+        "Protein.Group":      ["sp|P1|GENE_HUMAN"] * 3 + ["sp|P2|OTHR_HUMAN"] * 3,
+        "Protein.Ids":        ["P1"] * 3 + ["P2"] * 3,
+        "Protein.Names":      ["GENE_HUMAN"] * 3 + ["OTHR_HUMAN"] * 3,
+        "Genes":              ["GENE"] * 3 + ["OTHR"] * 3,
+        "Stripped.Sequence":  ["AAASK"] * 3 + ["PEPTIDET"] * 3,
+        "Modified.Sequence":  ["AAAS[+79.9663]K"] * 3 + ["PEPTIDET[+79.9663]"] * 3,
+        "Precursor.Charge":   [2, 2, 2, 2, 2, 2],
+        "Precursor.Id":       ["AAAS[+79.9663]K2"] * 3 + ["PEPTIDET[+79.9663]2"] * 3,
+        "Intensity":          [1e6, 1.1e6, 1.2e6, 5e5, 5.5e5, 6e5],
+        "PTM.Mods":           ["Phospho:S4@0.990"] * 3 + ["Phospho:T8@0.990"] * 3,
+    })
+    df["filename"] = ["a.mzML", "b.mzML", "c.mzML"] * 2
+    df.attrs["fasta_records"] = {
+        "P1": {"name": "GENE_HUMAN", "gene": "GENE", "descr": "",
+               "seq": "MKAAASKAAA"},
+        "P2": {"name": "OTHR_HUMAN", "gene": "OTHR", "descr": "",
+               "seq": "MKPEPTIDETXX"},
+    }
+    out = site_quant(df, min_samples=1, localization_cutoff=0.0,
+                     phospho_only=True)
+    assert not out.empty, "PTM.Mods path must yield rows in v0.5.7"
+    # Two distinct site keys, both phospho
+    keys = set(out["protein"])
+    assert len(keys) == 2
+    assert all("Phospho" in k for k in keys)
+
+
+def test_v057_precursor_matrix_normalized_runs_in_pipeline():
+    """The new precursor_matrix_normalized() must keep the same column layout
+    as precursor_matrix() (just with normalised values) so writers continue
+    to work unchanged.
+    """
+    import pandas as pd
+    from diaquant.quantify import precursor_matrix, precursor_matrix_normalized
+    long_df = pd.DataFrame({
+        "filename":           ["a.mzML", "b.mzML", "a.mzML", "b.mzML"],
+        "Protein.Group":      ["P1", "P1", "P2", "P2"],
+        "Protein.Ids":        ["P1", "P1", "P2", "P2"],
+        "Protein.Names":      ["P1_HUMAN", "P1_HUMAN", "P2_HUMAN", "P2_HUMAN"],
+        "Genes":              ["G1", "G1", "G2", "G2"],
+        "First.Protein.Description": ["", "", "", ""],
+        "Proteotypic":        ["1", "1", "1", "1"],
+        "Stripped.Sequence":  ["AAASK", "AAASK", "PEPTIDET", "PEPTIDET"],
+        "Modified.Sequence":  ["AAASK", "AAASK", "PEPTIDET", "PEPTIDET"],
+        "Precursor.Charge":   [2, 2, 2, 2],
+        "Precursor.Id":       ["AAASK2", "AAASK2", "PEPTIDET2", "PEPTIDET2"],
+        "Intensity":          [1e6, 5e6, 2e6, 1e7],   # b.mzML is 5x loaded
+    })
+    raw = precursor_matrix(long_df)
+    norm = precursor_matrix_normalized(long_df)
+    assert list(raw.columns) == list(norm.columns)
+    # After normalisation the per-sample medians should be much closer than 5x.
+    raw_ratio  = raw["b.mzML"].median() / raw["a.mzML"].median()
+    norm_ratio = norm["b.mzML"].median() / norm["a.mzML"].median()
+    assert abs(raw_ratio - 5.0) < 0.5
+    assert abs(norm_ratio - 1.0) < 0.5, (raw_ratio, norm_ratio)

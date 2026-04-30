@@ -54,9 +54,54 @@ from .modifications import DEFAULT_MODIFICATIONS, Modification, resolve_modifica
 
 log = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# v0.5.8.1: surface silent-fail reasons to the manifest writer.  When the
+# AlphaPeptDeep import or the actual prediction crashes the helper returns
+# ``None`` (so the caller transparently falls back to Sage's in-silico lib);
+# manifest.py reads ``_LAST_FAILURE`` to record *why* in run_manifest.json so
+# operators can diagnose silent regressions without grepping container logs.
+# Always overwritten by the most recent helper call; cleared on success.
+# ---------------------------------------------------------------------------
+_LAST_FAILURE: Optional[str] = None
+_LAST_FAILURE_PASS: Optional[str] = None
+
+
+def _record_failure(pass_label: Optional[str], reason: str) -> None:
+    global _LAST_FAILURE, _LAST_FAILURE_PASS
+    _LAST_FAILURE = reason
+    _LAST_FAILURE_PASS = pass_label
+
+
+def _clear_failure() -> None:
+    global _LAST_FAILURE, _LAST_FAILURE_PASS
+    _LAST_FAILURE = None
+    _LAST_FAILURE_PASS = None
+
+
+def get_last_failure() -> Tuple[Optional[str], Optional[str]]:
+    """Return ``(reason, pass_label)`` of the last silent fall-back, or two Nones."""
+    return _LAST_FAILURE, _LAST_FAILURE_PASS
+
+
+def peptdeep_self_check() -> Tuple[bool, str]:
+    """Cheap import-only health check used by manifest.py.
+
+    Returns ``(importable, detail)``.  ``detail`` is the AlphaPeptDeep version
+    on success or the exception text on failure.  No model loading happens.
+    """
+    try:  # pragma: no cover - depends on user environment
+        import peptdeep  # type: ignore
+        from peptdeep.pretrained_models import ModelManager  # noqa: F401
+        from peptdeep.protein.fasta import PredictSpecLibFasta  # noqa: F401
+        from alphabase.spectral_library.translate import translate_to_tsv  # noqa: F401
+        ver = getattr(peptdeep, "__version__", "unknown")
+        return True, f"peptdeep {ver}"
+    except Exception as exc:  # pragma: no cover
+        return False, f"{type(exc).__name__}: {exc}"
+
 
 # ---------------------------------------------------------------------------
-# PTM-name mapping: PTMQuant catalogue  →  AlphaPeptDeep / AlphaBase
+# PTM-name mapping: PTMQuant catalogue  → AlphaPeptDeep / AlphaBase
 # ---------------------------------------------------------------------------
 # AlphaPeptDeep uses the convention ``<Name>@<Residue>`` (or
 # ``<Name>@Protein_N-term`` etc.).  PTMQuant uses friendlier human-readable
@@ -249,6 +294,7 @@ def _load_alphapeptdeep() -> Optional[_AlphaPeptDeepHandles]:
             "AlphaPeptDeep unavailable (%s). Falling back to Sage's built-in "
             "theoretical library.", exc,
         )
+        _record_failure(None, f"alphapeptdeep_import_failed: {type(exc).__name__}: {exc}")
         return None
     return _AlphaPeptDeepHandles(
         ModelManager=ModelManager,
@@ -297,6 +343,7 @@ def fine_tune_models(cfg: DiaQuantConfig, psm_df) -> bool:
         return True
     except Exception as exc:  # pragma: no cover
         log.warning("Transfer learning failed (%s); using stock models.", exc)
+        _record_failure(None, f"transfer_learning_failed: {type(exc).__name__}: {exc}")
         return False
 
 
@@ -335,6 +382,7 @@ def generate_predicted_library(
     """
     if not cfg.predicted_library:
         log.info("[diaquant] %s: predicted library disabled (config).", pass_label)
+        _record_failure(pass_label, "predicted_library=false in config")
         return None
 
     # Translate PTMQuant mods into AlphaPeptDeep mod strings.
@@ -388,6 +436,9 @@ def generate_predicted_library(
         if cfg.pred_lib_fallback_in_silico:
             log.warning("[diaquant] %s: AlphaPeptDeep unavailable; "
                         "falling back to in-silico library.", pass_label)
+            # _load_alphapeptdeep already filled _LAST_FAILURE; tag with pass.
+            global _LAST_FAILURE_PASS
+            _LAST_FAILURE_PASS = pass_label
             return None
         raise RuntimeError(
             "AlphaPeptDeep is required (predicted_library=true, "
@@ -442,12 +493,14 @@ def generate_predicted_library(
             except Exception as exc:  # pragma: no cover
                 log.warning("Could not write shared cache (%s)", exc)
         _write_cache_meta(out_tsv, cfg, fix_mods, var_mods, cache_id)
+        _clear_failure()
         return out_tsv
     except Exception as exc:  # pragma: no cover
         log.warning(
             "[diaquant] %s: AlphaPeptDeep prediction failed (%s)",
             pass_label, exc,
         )
+        _record_failure(pass_label, f"prediction_failed: {type(exc).__name__}: {exc}")
         if cfg.pred_lib_fallback_in_silico:
             log.warning("[diaquant] %s: falling back to in-silico library.",
                         pass_label)

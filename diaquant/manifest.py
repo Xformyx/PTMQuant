@@ -176,6 +176,71 @@ def write_run_manifest(
         and (n_psms_rescored is None or n_psms_rescored > 0)
     )
 
+    # ----- v0.5.8.1: surface silent-fail diagnostics -----
+    pl_reason: Optional[str] = None
+    pl_reason_pass: Optional[str] = None
+    peptdeep_ok: Optional[bool] = None
+    peptdeep_detail: Optional[str] = None
+    try:
+        from .predicted_library import (
+            get_last_failure as _get_last_failure,
+            peptdeep_self_check as _peptdeep_self_check,
+        )
+        pl_reason, pl_reason_pass = _get_last_failure()
+        peptdeep_ok, peptdeep_detail = _peptdeep_self_check()
+    except Exception:  # pragma: no cover - import quirk only
+        pass
+
+    # Read the build-time peptdeep self-check result baked into the image.
+    peptdeep_build_status: Optional[str] = None
+    try:
+        status_path = Path("/etc/ptmquant/peptdeep_status.txt")
+        if status_path.exists():
+            peptdeep_build_status = status_path.read_text().strip()
+    except Exception:
+        peptdeep_build_status = None
+
+    pl_block: Dict[str, Any] = {
+        "enabled_in_config": bool(getattr(cfg, "predicted_library", False)),
+        "applied": predicted_library_applied,
+        "cache_dir": str(getattr(cfg, "pred_lib_cache_dir", "") or ""),
+        "files": lib_entries,
+        "peptdeep_importable": peptdeep_ok,
+        "peptdeep_detail": peptdeep_detail,
+        "peptdeep_build_status": peptdeep_build_status,
+    }
+    if (not predicted_library_applied) and pl_reason:
+        pl_block["reason"] = pl_reason
+        if pl_reason_pass:
+            pl_block["reason_pass"] = pl_reason_pass
+
+    rescore_block: Dict[str, Any] = {
+        "enabled_in_config": bool(getattr(cfg, "rescore_with_prediction", False)),
+        "applied": rescore_applied,
+        "n_psms_raw": n_psms_raw,
+        "n_psms_rescored": n_psms_rescored,
+        "n_psms_after_fdr": n_psms_after_fdr,
+    }
+    if (not rescore_applied) and pl_reason:
+        rescore_block["reason"] = (
+            "predicted_library not applied"
+            if not predicted_library_applied
+            else pl_reason
+        )
+
+    mbr_block: Dict[str, Any] = {
+        "enabled_in_config": bool(getattr(cfg, "match_between_runs", False)),
+        "n_psms_rescued": int(n_psms_mbr) if n_psms_mbr is not None else 0,
+    }
+    if (
+        bool(getattr(cfg, "mbr_inject_predicted_donors", False))
+        and not predicted_library_applied
+    ):
+        mbr_block["injection_reason"] = (
+            "mbr_inject_predicted_donors=true requested but "
+            "predicted_library was not applied -> no donors injected"
+        )
+
     manifest: Dict[str, Any] = {
         "diaquant_version": diaquant_version,
         "run_started_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -186,23 +251,9 @@ def write_run_manifest(
             "HOSTNAME": os.environ.get("HOSTNAME"),
         },
         "effective_config": _json_safe(cfg),
-        "predicted_library": {
-            "enabled_in_config": bool(getattr(cfg, "predicted_library", False)),
-            "applied": predicted_library_applied,
-            "cache_dir": str(getattr(cfg, "pred_lib_cache_dir", "") or ""),
-            "files": lib_entries,
-        },
-        "rescoring": {
-            "enabled_in_config": bool(getattr(cfg, "rescore_with_prediction", False)),
-            "applied": rescore_applied,
-            "n_psms_raw": n_psms_raw,
-            "n_psms_rescored": n_psms_rescored,
-            "n_psms_after_fdr": n_psms_after_fdr,
-        },
-        "mbr": {
-            "enabled_in_config": bool(getattr(cfg, "match_between_runs", False)),
-            "n_psms_rescued": int(n_psms_mbr) if n_psms_mbr is not None else 0,
-        },
+        "predicted_library": pl_block,
+        "rescoring": rescore_block,
+        "mbr": mbr_block,
         "matrices": {
             "pr_matrix_rows": pr_rows,
             "pg_matrix_rows": pg_rows,

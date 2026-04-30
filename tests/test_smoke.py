@@ -993,7 +993,7 @@ def test_verify_ptmquant_passes_for_healthy_output(tmp_path):
     import sys
 
     (tmp_path / "run_manifest.json").write_text(json.dumps({
-        "diaquant_version": "0.5.8",
+        "diaquant_version": "0.5.8.1",
         "predicted_library": {"applied": True, "paths": ["p.tsv"]},
         "rescoring": {"configured": True, "applied": True},
         "mbr": {"configured": True, "applied": True, "n_rescued": 12},
@@ -1304,3 +1304,82 @@ def test_v058_mbr_injected_donors_only_promote_observed_rows() -> None:
     seqs = set(merged["Modified.Sequence"])
     assert "PEPTIDE"  in seqs            # original confident
     assert "GHOST"    not in seqs        # never scored by Sage -> rejected
+
+
+# ============================================================================
+# v0.5.8.1 regression: predicted_library failure surfaces in run_manifest.json
+# ============================================================================
+def test_v0581_predicted_library_reason_in_manifest(tmp_path):
+    """When predicted_library is enabled but no library was produced, the
+    manifest must surface a human-readable ``reason`` so operators can
+    diagnose silent fall-back without grepping container logs."""
+    import json
+    from diaquant import predicted_library as pl
+    from diaquant.config import DiaQuantConfig
+    from diaquant.manifest import write_run_manifest
+
+    pl._record_failure("phospho", "alphapeptdeep_import_failed: ImportError: synthetic")
+
+    cfg = DiaQuantConfig(
+        fasta=str(tmp_path / "fake.fasta"),
+        mzml_files=[],
+        output_dir=str(tmp_path / "out"),
+        predicted_library=True,
+        rescore_with_prediction=True,
+        match_between_runs=True,
+        mbr_inject_predicted_donors=True,
+    )
+    (tmp_path / "out").mkdir()
+    (tmp_path / "fake.cfg").write_text("dummy: 1\n")
+
+    p = write_run_manifest(
+        out_dir=tmp_path / "out",
+        cfg=cfg,
+        diaquant_version="0.5.8.1",
+        config_yaml_src=tmp_path / "fake.cfg",
+        library_paths=[],
+        n_psms_raw=1000,
+        n_psms_rescored=0,
+        n_psms_after_fdr=500,
+        n_psms_mbr=0,
+        pr_rows=10, pg_rows=2, site_rows=1,
+    )
+    data = json.loads(p.read_text())
+    assert data["predicted_library"]["applied"] is False
+    assert "alphapeptdeep_import_failed" in data["predicted_library"]["reason"]
+    assert data["predicted_library"]["reason_pass"] == "phospho"
+    assert "no donors injected" in data["mbr"]["injection_reason"]
+    assert data["rescoring"]["applied"] is False
+    assert "predicted_library" in data["rescoring"]["reason"]
+    pl._clear_failure()
+
+
+def test_v0581_peptdeep_self_check_keys_present(tmp_path):
+    """The manifest writer always populates the peptdeep_* observability
+    fields, regardless of whether AlphaPeptDeep is installed in the test
+    environment."""
+    import json
+    from diaquant.config import DiaQuantConfig
+    from diaquant.manifest import write_run_manifest
+
+    cfg = DiaQuantConfig(
+        fasta=str(tmp_path / "fake.fasta"),
+        mzml_files=[],
+        output_dir=str(tmp_path / "out"),
+        predicted_library=True,
+    )
+    (tmp_path / "out").mkdir()
+    (tmp_path / "fake.cfg").write_text("dummy: 1\n")
+    p = write_run_manifest(
+        out_dir=tmp_path / "out",
+        cfg=cfg,
+        diaquant_version="0.5.8.1",
+        config_yaml_src=tmp_path / "fake.cfg",
+        library_paths=[],
+        n_psms_raw=0, n_psms_rescored=0, n_psms_after_fdr=0,
+        n_psms_mbr=0, pr_rows=0, pg_rows=0, site_rows=0,
+    )
+    data = json.loads(p.read_text())
+    assert "peptdeep_importable" in data["predicted_library"]
+    assert "peptdeep_detail" in data["predicted_library"]
+    assert "peptdeep_build_status" in data["predicted_library"]

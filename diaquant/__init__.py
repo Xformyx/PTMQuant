@@ -31,6 +31,21 @@ Modules:
                       stub manifest on exception
 - cli:                click-based command-line interface
 
+v0.5.8.1 changes (the "observability hotfix" release):
+  P0.   When predicted_library is enabled but the AlphaPeptDeep import,
+        model load or actual prediction silently fails (returning ``None``
+        so the caller falls back to Sage's in-silico library),
+        ``run_manifest.json`` now records *why* in three new fields:
+           predicted_library.reason            (e.g. ``alphapeptdeep_import_failed: ...``)
+           predicted_library.peptdeep_importable / peptdeep_detail   (live import self-check)
+           predicted_library.peptdeep_build_status                   (cached at image build time)
+           rescoring.reason / mbr.injection_reason                   (downstream consequences)
+        This fixes the v0.5.8 production diagnosis blind spot where
+        predicted_library: applied=false / mbr.n_psms_rescued=0 left
+        the operator with no way to tell whether the cause was the
+        config, the container or the input.  No behavioural change for
+        successful runs.
+
 v0.5.8 changes (the "identification sensitivity" release):
   P0.   Predicted-library MBR donor injection.  AlphaPeptDeep predicted
         precursors are now added to the MBR donor pool with FDR-safe
@@ -113,4 +128,4 @@ v0.5.5 changes (the "observability + PTM" release):
         ``pass_phospho/`` / cache dir so multi-pass outputs are visible.
 """
 
-__version__ = "0.5.8"
+__version__ = "0.5.8.1"

@@ -40,6 +40,13 @@ class PassProfile:
     max_precursor_charge: Optional[int] = None
     site_probability_cutoff: Optional[float] = None
     fragment_tol_ppm: Optional[float] = None
+    #: v0.5.8 - per-pass peptide-level FDR. ``None`` means "inherit
+    #: ``DiaQuantConfig.peptide_fdr``" (1% by default). PTM-aware passes
+    #: (phospho, ubiq, K-acyl, etc.) override this to 0.05 because the FDR
+    #: estimator is dominated by unmodified peptides while the modified
+    #: peptides we actually want to keep get truncated at 1%. Site-level
+    #: false positives are still kept out by ``site_probability_cutoff``.
+    peptide_fdr: Optional[float] = None
     # Whether this pass is the "whole-proteome" backbone used for
     # protein-group quantification.  Only one pass should set this True.
     is_whole_proteome: bool = False
@@ -73,7 +80,11 @@ PASS_PROFILES: Dict[str, PassProfile] = {
         description=(
             "STY phosphorylation pass.  Allows up to 3 variable mods and a "
             "stricter site probability cutoff (0.75) consistent with the "
-            "Bekker-Jensen 2020 phospho-DIA workflow."
+            "Bekker-Jensen 2020 phospho-DIA workflow.  v0.5.8 relaxes the "
+            "peptide-level FDR to 5% for this pass: the dominant "
+            "non-phospho population otherwise pins the FDR estimator and "
+            "truncates the few real phospho rows.  Site false positives "
+            "remain controlled by site_probability_cutoff=0.75."
         ),
         variable_modifications=["Oxidation", "Acetyl_Nterm", "Phospho"],
         missed_cleavages=2,
@@ -82,13 +93,14 @@ PASS_PROFILES: Dict[str, PassProfile] = {
         max_peptide_length=30,
         max_precursor_charge=4,
         site_probability_cutoff=0.75,
+        peptide_fdr=0.05,
     ),
     "ubiquitin": PassProfile(
         name="ubiquitin",
         description=(
             "K-GlyGly (UniMod:121) ubiquitin remnant pass.  Missed "
             "cleavages raised to 3 because the GG tag blocks tryptic "
-            "cleavage at the modified lysine."
+            "cleavage at the modified lysine.  v0.5.8: peptide_fdr=0.05."
         ),
         variable_modifications=["Oxidation", "Acetyl_Nterm", "GlyGly"],
         missed_cleavages=3,
@@ -97,6 +109,7 @@ PASS_PROFILES: Dict[str, PassProfile] = {
         max_peptide_length=35,
         max_precursor_charge=4,
         site_probability_cutoff=0.75,
+        peptide_fdr=0.05,
     ),
     "acetyl_methyl": PassProfile(
         name="acetyl_methyl",
@@ -104,7 +117,8 @@ PASS_PROFILES: Dict[str, PassProfile] = {
             "Lysine acetylation plus K/R mono/di/tri-methylation.  These "
             "PTMs share the property of blocking tryptic cleavage at the "
             "modified lysine, so missed cleavages are raised to 3.  This "
-            "is the headline pass that DIA-NN cannot quantify reliably."
+            "is the headline pass that DIA-NN cannot quantify reliably. "
+            "v0.5.8: peptide_fdr=0.05."
         ),
         variable_modifications=[
             "Oxidation", "Acetyl_Nterm",
@@ -116,12 +130,13 @@ PASS_PROFILES: Dict[str, PassProfile] = {
         max_peptide_length=35,
         max_precursor_charge=4,
         site_probability_cutoff=0.75,
+        peptide_fdr=0.05,
     ),
     "succinyl_acyl": PassProfile(
         name="succinyl_acyl",
         description=(
             "K-acyl pass: succinyl, malonyl, crotonyl.  All block tryptic "
-            "cleavage at K, so missed cleavages set to 3."
+            "cleavage at K, so missed cleavages set to 3.  v0.5.8: peptide_fdr=0.05."
         ),
         variable_modifications=[
             "Oxidation", "Acetyl_Nterm",
@@ -133,6 +148,7 @@ PASS_PROFILES: Dict[str, PassProfile] = {
         max_peptide_length=35,
         max_precursor_charge=4,
         site_probability_cutoff=0.75,
+        peptide_fdr=0.05,
     ),
     # ---- New in 0.5.0: additional PTM families ----
     "oglcnac": PassProfile(
@@ -142,7 +158,7 @@ PASS_PROFILES: Dict[str, PassProfile] = {
             "S / T.  The modification does not block tryptic cleavage so "
             "missed_cleavages stays at the default 2, but the fragment "
             "tolerance is slightly relaxed because O-GlcNAc peptides show "
-            "prominent sugar-loss in-source fragmentation."
+            "prominent sugar-loss in-source fragmentation.  v0.5.8: peptide_fdr=0.05."
         ),
         variable_modifications=["Oxidation", "Acetyl_Nterm", "OGlcNAc"],
         missed_cleavages=2,
@@ -152,6 +168,7 @@ PASS_PROFILES: Dict[str, PassProfile] = {
         max_precursor_charge=4,
         site_probability_cutoff=0.75,
         fragment_tol_ppm=15.0,
+        peptide_fdr=0.05,
     ),
     "citrullination": PassProfile(
         name="citrullination",
@@ -160,7 +177,8 @@ PASS_PROFILES: Dict[str, PassProfile] = {
             "isobaric with deamidation on N/Q so high MS1 accuracy is "
             "required; the pass otherwise mirrors the phospho profile but "
             "keeps missed_cleavages at 2 (Arg is still cleaved by trypsin "
-            "if the modified residue is not the cleavage-site Arg itself)."
+            "if the modified residue is not the cleavage-site Arg itself). "
+            "v0.5.8: peptide_fdr=0.05."
         ),
         variable_modifications=["Oxidation", "Acetyl_Nterm", "Citrullination"],
         missed_cleavages=2,
@@ -169,12 +187,14 @@ PASS_PROFILES: Dict[str, PassProfile] = {
         max_peptide_length=30,
         max_precursor_charge=4,
         site_probability_cutoff=0.75,
+        peptide_fdr=0.05,
     ),
     "lactyl_acyl": PassProfile(
         name="lactyl_acyl",
         description=(
             "Less common K-acylations: lactyl, propionyl, butyryl.  Share "
-            "the K-acyl tryptic-block property, so missed_cleavages is 3."
+            "the K-acyl tryptic-block property, so missed_cleavages is 3. "
+            "v0.5.8: peptide_fdr=0.05."
         ),
         variable_modifications=[
             "Oxidation", "Acetyl_Nterm",
@@ -186,6 +206,7 @@ PASS_PROFILES: Dict[str, PassProfile] = {
         max_peptide_length=35,
         max_precursor_charge=4,
         site_probability_cutoff=0.75,
+        peptide_fdr=0.05,
     ),
 }
 
@@ -225,6 +246,7 @@ def resolve_passes(selected: List[str],
                 max_precursor_charge=item.get("max_precursor_charge"),
                 site_probability_cutoff=item.get("site_probability_cutoff"),
                 fragment_tol_ppm=item.get("fragment_tol_ppm"),
+                peptide_fdr=item.get("peptide_fdr"),
                 is_whole_proteome=bool(item.get("is_whole_proteome", False)),
             )
         )

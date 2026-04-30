@@ -993,7 +993,7 @@ def test_verify_ptmquant_passes_for_healthy_output(tmp_path):
     import sys
 
     (tmp_path / "run_manifest.json").write_text(json.dumps({
-        "diaquant_version": "0.5.7",
+        "diaquant_version": "0.5.8",
         "predicted_library": {"applied": True, "paths": ["p.tsv"]},
         "rescoring": {"configured": True, "applied": True},
         "mbr": {"configured": True, "applied": True, "n_rescued": 12},
@@ -1175,3 +1175,132 @@ def test_v057_precursor_matrix_normalized_runs_in_pipeline():
     norm_ratio = norm["b.mzML"].median() / norm["a.mzML"].median()
     assert abs(raw_ratio - 5.0) < 0.5
     assert abs(norm_ratio - 1.0) < 0.5, (raw_ratio, norm_ratio)
+
+
+# ---------------------------------------------------------------------------
+# v0.5.8 regression tests
+# ---------------------------------------------------------------------------
+
+def test_v058_phospho_pass_uses_5pct_peptide_fdr() -> None:
+    """The built-in PTM-aware profiles must override peptide_fdr to 0.05.
+
+    v0.5.7 left peptide_fdr at the global 1% which empirically truncates
+    real phospho rows because the FDR estimator is dominated by unmodified
+    peptides.  v0.5.8 sets peptide_fdr=0.05 on every PTM-aware profile
+    while keeping site_probability_cutoff=0.75 as the localisation
+    safeguard.  whole_proteome must still inherit the strict 1% global.
+    """
+    ptm_passes = [
+        "phospho", "ubiquitin", "acetyl_methyl", "succinyl_acyl",
+        "oglcnac", "citrullination", "lactyl_acyl",
+    ]
+    for name in ptm_passes:
+        prof = PASS_PROFILES[name]
+        assert prof.peptide_fdr == 0.05, (
+            f"profile {name} peptide_fdr={prof.peptide_fdr}, expected 0.05"
+        )
+        assert prof.site_probability_cutoff == 0.75, (
+            f"profile {name} site cutoff must remain 0.75"
+        )
+    assert PASS_PROFILES["whole_proteome"].peptide_fdr is None
+
+
+def test_v058_imputation_group_median_respects_min_obs() -> None:
+    """Group-aware imputation must NOT invent values when a group has fewer
+    than ``min_obs_per_group`` valid observations."""
+    from diaquant.imputation import (
+        ImputeParams, build_sample_to_group, impute_matrix,
+    )
+
+    cols = ["S1", "S2", "S3", "T1", "T2", "T3"]
+    sample_sheet = pd.DataFrame({
+        "mzml_basename": cols,
+        "group": ["ctrl"] * 3 + ["treat"] * 3,
+    })
+    s2g = build_sample_to_group(cols, sample_sheet)
+    assert s2g == {"S1": "ctrl", "S2": "ctrl", "S3": "ctrl",
+                   "T1": "treat", "T2": "treat", "T3": "treat"}
+
+    matrix = pd.DataFrame({
+        "Precursor.Id": ["P1", "P2"],
+        "S1": [100.0, 200.0],
+        "S2": [120.0, 240.0],
+        "S3": [None,  None],
+        "T1": [None,  300.0],
+        "T2": [None,  None],
+        "T3": [None,  None],
+    })
+    out = impute_matrix(
+        matrix, s2g, id_cols=["Precursor.Id"],
+        params=ImputeParams(method="group_median", min_obs_per_group=2),
+    )
+    # P1 ctrl S3 imputed = median(100, 120) = 110; treat all stay NaN
+    assert out.loc[0, "S3"] == 110.0
+    assert pd.isna(out.loc[0, "T1"]) and pd.isna(out.loc[0, "T2"])
+    # P2 ctrl S3 imputed = median(200, 240) = 220; treat T1 stays original
+    assert out.loc[1, "S3"] == 220.0
+    assert out.loc[1, "T1"] == 300.0
+    assert "Intensity.Imputed.Frac" in out.columns
+
+
+def test_v058_predicted_donor_table_reads_alphapeptdeep_columns(tmp_path) -> None:
+    """``_load_predicted_donor_table`` must accept AlphaPeptDeep flavoured
+    column names and return the canonical triple expected by the MBR pool."""
+    from diaquant.cli import _load_predicted_donor_table
+
+    p = tmp_path / "predicted.tsv"
+    pd.DataFrame({
+        "ModifiedPeptide": ["PEPTIDE", "PEPS[Phospho (S)]TIDE", "_NA_"],
+        "PrecursorCharge": [2, 3, 2],
+        "iRT": [12.5, 14.1, None],
+    }).to_csv(p, sep="\t", index=False)
+    donors = _load_predicted_donor_table([str(p)])
+    assert donors is not None and len(donors) == 2
+    assert set(donors.columns) == {"Modified.Sequence", "Precursor.Charge",
+                                   "Pred.RT"}
+    assert donors["Precursor.Charge"].dtype.kind == "i"
+    assert donors["Pred.RT"].dtype.kind == "f"
+
+
+def test_v058_predicted_donor_table_returns_none_without_paths() -> None:
+    """No predicted-library means MBR injection is silently skipped."""
+    from diaquant.cli import _load_predicted_donor_table
+
+    assert _load_predicted_donor_table([]) is None
+    assert _load_predicted_donor_table(["/no/such/file.tsv"]) is None
+
+
+def test_v058_mbr_injected_donors_only_promote_observed_rows() -> None:
+    """Predicted donors must NOT invent PSMs - they only relax the FDR cut
+    on rows Sage already scored at any q-value."""
+    from diaquant.mbr import MBRParams, match_between_runs
+
+    psm_full = pd.DataFrame({
+        "Modified.Sequence": ["PEPTIDE", "PEPSTIDE"],
+        "Precursor.Charge": [2, 2],
+        "filename": ["run1.mzML", "run1.mzML"],
+        "Q.Value": [0.005, 0.04],
+        "Precursor.Quantity": [1e5, 5e4],
+        "Protein.Group": ["A", "A"],
+        "RT": [10.0, 10.5],
+        "RT.Aligned": [10.0, 10.5],
+    })
+    psm_confident = psm_full.iloc[[0]].copy()
+    predicted = pd.DataFrame({
+        "Modified.Sequence":  ["PEPSTIDE", "GHOST"],
+        "Precursor.Charge":   [2, 2],
+        "Pred.RT":            [10.6, 12.0],
+    })
+    params = MBRParams(
+        enabled=True, q_donor=0.01, q_rescue=0.05,
+        rt_tolerance_min=1.0,
+        inject_predicted_donors=True,
+        min_injected_observed_runs=1,
+        injected_rt_tolerance_min=1.5,
+    )
+    merged, _ = match_between_runs(
+        psm_full, psm_confident, params=params, predicted_donors=predicted,
+    )
+    seqs = set(merged["Modified.Sequence"])
+    assert "PEPTIDE"  in seqs            # original confident
+    assert "GHOST"    not in seqs        # never scored by Sage -> rejected

@@ -36,6 +36,7 @@ from .quantify import (
     protein_quant,
     site_quant,
 )
+from .imputation import ImputeParams, build_sample_to_group, impute_matrix
 from .manifest import write_run_manifest
 from .mbr import MBRParams, match_between_runs
 from .razor import apply_razor_grouping
@@ -50,6 +51,58 @@ from .writer import (
     write_pr_matrix,
     write_site_matrix,
 )
+
+
+# ---------------------------------------------------------------------------
+# v0.5.8: helper for loading predicted-library donor table for MBR injection
+# ---------------------------------------------------------------------------
+
+def _load_predicted_donor_table(library_paths) -> "pd.DataFrame | None":
+    """Read predicted-library TSVs and return a unified donor table.
+
+    The predicted library may have one of two AlphaPeptDeep-flavoured
+    column conventions; we accept either and surface the canonical
+    ``Modified.Sequence`` / ``Precursor.Charge`` / ``Pred.RT`` triple.
+    Returns ``None`` when no usable donors are available so the MBR caller
+    can short-circuit cleanly.
+    """
+    if not library_paths:
+        return None
+    frames = []
+    for path in library_paths:
+        p = Path(path)
+        if not p.exists():
+            continue
+        try:
+            df = pd.read_csv(p, sep="\t", low_memory=False)
+        except Exception as exc:                              # pragma: no cover
+            click.echo(f"[diaquant] WARNING: could not read predicted lib "
+                       f"{p}: {exc}")
+            continue
+        # Map column synonyms.
+        seq_col = next((c for c in ("Modified.Sequence", "ModifiedPeptide",
+                                    "modified_sequence", "ModifiedSequence")
+                        if c in df.columns), None)
+        chg_col = next((c for c in ("Precursor.Charge", "PrecursorCharge",
+                                    "precursor_charge", "Charge")
+                        if c in df.columns), None)
+        rt_col  = next((c for c in ("Pred.RT", "iRT", "RT", "rt_pred",
+                                    "PredictedRT", "NormalizedRetentionTime")
+                        if c in df.columns), None)
+        if not (seq_col and chg_col and rt_col):
+            continue
+        sub = df[[seq_col, chg_col, rt_col]].copy()
+        sub.columns = ["Modified.Sequence", "Precursor.Charge", "Pred.RT"]
+        frames.append(sub)
+    if not frames:
+        return None
+    out = (pd.concat(frames, ignore_index=True)
+             .dropna(subset=["Modified.Sequence", "Precursor.Charge",
+                             "Pred.RT"])
+             .drop_duplicates(["Modified.Sequence", "Precursor.Charge"]))
+    out["Precursor.Charge"] = out["Precursor.Charge"].astype(int)
+    out["Pred.RT"] = out["Pred.RT"].astype(float)
+    return out if not out.empty else None
 
 
 @click.group()
@@ -370,6 +423,14 @@ def run(cfg_path: str, resume: bool) -> None:
             psm_full = psm_full.merge(rt_map, on=["Modified.Sequence",
                                                    "Precursor.Charge",
                                                    "filename"], how="left")
+        # v0.5.8: load predicted-library precursors as MBR donors so
+        # phospho/PTM precursors absent from any confident-PSM run get a
+        # chance to be rescued. Predicted donors only promote rows that Sage
+        # already scored (target-decoy FDR preserved).
+        predicted_donors = _load_predicted_donor_table(
+            long_df.attrs.get("predicted_library_paths", []),
+        )
+        inject = bool(getattr(cfg, "mbr_inject_predicted_donors", True))
         merged, mbr_stats = match_between_runs(
             psm_full,
             long_df,
@@ -380,7 +441,13 @@ def run(cfg_path: str, resume: bool) -> None:
                 rt_tolerance_min=getattr(cfg, "mbr_rt_tol_min", 1.0),
                 min_donor_runs=max(1,
                     getattr(cfg, "mbr_min_donors", 2) - 1),
+                inject_predicted_donors=inject,
+                min_injected_observed_runs=int(getattr(
+                    cfg, "mbr_min_injected_observed_runs", 1)),
+                injected_rt_tolerance_min=float(getattr(
+                    cfg, "mbr_injected_rt_tol_min", 1.5)),
             ),
+            predicted_donors=predicted_donors,
         )
         # ensure decorations survive concat
         for k in ("fasta_records", "protein_group_accession",
@@ -452,10 +519,82 @@ def run(cfg_path: str, resume: bool) -> None:
     )
 
     out = cfg.output_dir
+
+    # ---- v0.5.8 (P1-b): group-aware imputation ---------------------------
+    impute_method = getattr(cfg, "impute_method", "none")
+    n_imputed_total = 0
+    if impute_method != "none":
+        sheet_df = (load_sample_sheet(cfg.sample_sheet)
+                    if cfg.sample_sheet is not None else None)
+        impute_params = ImputeParams(
+            method=impute_method,
+            min_obs_per_group=int(getattr(cfg, "impute_min_obs_per_group", 2)),
+            knn_n_neighbors=int(getattr(cfg, "impute_knn_n_neighbors", 5)),
+            knn_weights=getattr(cfg, "impute_knn_weights", "distance"),
+        )
+        click.echo(f"[diaquant] imputation: method={impute_method} "
+                   f"min_obs_per_group={impute_params.min_obs_per_group}")
+
+        # ---- pr_matrix
+        sample_cols_pr = [c for c in pr_wide.columns if c not in PR_COLS]
+        s2g_pr = build_sample_to_group(sample_cols_pr, sheet_df)
+        pr_wide = impute_matrix(pr_wide, s2g_pr, PR_COLS, impute_params)
+
+        # ---- pg_matrix (writer expects long pg_lfq with 'protein' col;
+        # we cannot impute before the writer aligns metadata, so we let the
+        # writer build the matrix first and then re-read + impute.
+        # Same for site_lfq.)  We hand the writer the un-imputed frames and
+        # post-process the on-disk TSVs in-place below.
+
     write_pr_matrix(pr_wide, out / "report.pr_matrix.tsv")
     write_pg_matrix(pg_lfq, pr_wide, out / "report.pg_matrix.tsv")
     write_site_matrix(site_lfq, out / "report.ptm_site_matrix.tsv")
     write_main_report(long_df, out / "report.tsv")
+
+    if impute_method != "none":
+        sheet_df = (load_sample_sheet(cfg.sample_sheet)
+                    if cfg.sample_sheet is not None else None)
+        impute_params = ImputeParams(
+            method=impute_method,
+            min_obs_per_group=int(getattr(cfg, "impute_min_obs_per_group", 2)),
+            knn_n_neighbors=int(getattr(cfg, "impute_knn_n_neighbors", 5)),
+            knn_weights=getattr(cfg, "impute_knn_weights", "distance"),
+        )
+        # pg_matrix
+        try:
+            pg_path = out / "report.pg_matrix.tsv"
+            pg_df = pd.read_csv(pg_path, sep="\t")
+            sample_cols_pg = [c for c in pg_df.columns if c not in PG_COLS]
+            s2g_pg = build_sample_to_group(sample_cols_pg, sheet_df)
+            pg_df = impute_matrix(pg_df, s2g_pg, PG_COLS, impute_params)
+            pg_df.to_csv(pg_path, sep="\t", index=False, na_rep="")
+            n_imputed_total += int(
+                (pg_df["Intensity.Imputed.Frac"] > 0).sum()
+            )
+        except Exception as exc:                              # pragma: no cover
+            click.secho(f"  (pg imputation skipped: {exc})", fg="yellow")
+        # site_matrix
+        try:
+            site_path = out / "report.ptm_site_matrix.tsv"
+            site_df = pd.read_csv(site_path, sep="\t")
+            site_id_cols = [c for c in ("Protein.Group", "Genes", "PTM.Site",
+                                          "PTM.Modification",
+                                          "Best.Site.Probability")
+                            if c in site_df.columns]
+            sample_cols_site = [c for c in site_df.columns
+                                if c not in site_id_cols]
+            if sample_cols_site:
+                s2g_site = build_sample_to_group(sample_cols_site, sheet_df)
+                site_df = impute_matrix(site_df, s2g_site, site_id_cols,
+                                        impute_params)
+                site_df.to_csv(site_path, sep="\t", index=False, na_rep="")
+                n_imputed_total += int(
+                    (site_df["Intensity.Imputed.Frac"] > 0).sum()
+                )
+        except Exception as exc:                              # pragma: no cover
+            click.secho(f"  (site imputation skipped: {exc})", fg="yellow")
+        click.echo(f"  imputation touched {n_imputed_total} rows total "
+                   f"across pg + site matrices")
 
     if cfg.sample_sheet is not None:
         click.echo(f"[diaquant] sample sheet detected: {cfg.sample_sheet}")

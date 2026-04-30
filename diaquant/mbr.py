@@ -65,6 +65,19 @@ class MBRParams:
     rt_tolerance_min: float = 1.0
     #: Minimum number of donor runs required (to avoid single-hit spurious MBR).
     min_donor_runs: int = 1
+    #: v0.5.8 - allow predicted-library precursors to act as MBR donors even
+    #: when no run has a confident PSM. Each injected donor still requires
+    #: ``min_injected_observed_runs`` runs to contain a sub-threshold PSM
+    #: within ``rt_tolerance_min`` of the predicted RT to be promoted, so
+    #: target-decoy FDR is preserved (no PSM is invented).
+    inject_predicted_donors: bool = True
+    #: An injected donor must be observed (at any q-value) in at least this
+    #: many runs before its sub-threshold PSMs are promoted. Set to 1 for
+    #: maximum recall, 2+ for stricter behaviour.
+    min_injected_observed_runs: int = 1
+    #: Predicted RT tolerance (minutes) for injected donors. Defaults to the
+    #: same window as observed donors.
+    injected_rt_tolerance_min: float = 1.5
 
 
 # ---------------------------------------------------------------------------
@@ -98,14 +111,50 @@ def _donor_rt_table(confident: pd.DataFrame) -> pd.DataFrame:
 def match_between_runs(psm_full: pd.DataFrame,
                        psm_confident: pd.DataFrame,
                        params: Optional[MBRParams] = None,
+                       predicted_donors: Optional[pd.DataFrame] = None,
                        ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Rescue cross-run PSMs and return ``(merged_psms, stats)``."""
+    """Rescue cross-run PSMs and return ``(merged_psms, stats)``.
+
+    Parameters
+    ----------
+    psm_full
+        Pre-FDR PSM pool (Sage's full PSM table) used to look up sub-threshold
+        rescues for confident donors.
+    psm_confident
+        FDR-passing PSMs (the pre-MBR confident set).
+    params
+        :class:`MBRParams`.
+    predicted_donors
+        v0.5.8. Optional DataFrame of predicted-library precursors with at
+        least the columns ``Modified.Sequence``, ``Precursor.Charge`` and
+        ``Pred.RT``. When provided AND ``params.inject_predicted_donors`` is
+        True, any predicted precursor not already a confident donor is added
+        to the donor pool so its sub-threshold PSMs in ``psm_full`` can be
+        rescued. The injected donors do not invent PSMs - they only let the
+        existing rescue path consider precursors that Sage scored above the
+        search-score floor but below the FDR cut.
+    """
     params = params or MBRParams()
     if not params.enabled or psm_full.empty or psm_confident.empty:
         return psm_confident.copy(), _empty_stats(psm_confident)
 
     donors = _donor_rt_table(psm_confident)
     donors = donors[donors["donor_n_runs"] >= params.min_donor_runs]
+
+    # ---- v0.5.8: inject predicted-library precursors as donors ------------
+    n_injected = 0
+    if (params.inject_predicted_donors
+            and predicted_donors is not None
+            and not predicted_donors.empty):
+        injected = _injected_donor_table(
+            predicted_donors, psm_full, donors,
+            min_runs=params.min_injected_observed_runs,
+        )
+        if not injected.empty:
+            donors = pd.concat([donors, injected], ignore_index=True)
+            n_injected = int(len(injected))
+            logger.info("MBR: injected %d predicted-library donors", n_injected)
+
     if donors.empty:
         logger.info("MBR: no donors pass min_donor_runs=%d filter",
                     params.min_donor_runs)
@@ -134,11 +183,22 @@ def match_between_runs(psm_full: pd.DataFrame,
         return confident.drop(columns=["MBR", "Q.Value.MBR"]) \
                         .assign(MBR=False, **{"Q.Value.MBR": np.nan}), stats
 
-    # join with donor RT for tolerance check
+    # join with donor RT for tolerance check. Injected donors get a slightly
+    # looser RT tolerance because their RT is predicted, not observed.
     rt_col = "RT.Aligned" if "RT.Aligned" in full.columns else "RT"
-    full = full.merge(donors[["_pkey", "donor_rt"]], on="_pkey", how="left")
+    full = full.merge(
+        donors[["_pkey", "donor_rt", "is_injected"]
+               if "is_injected" in donors.columns else ["_pkey", "donor_rt"]],
+        on="_pkey", how="left",
+    )
+    if "is_injected" not in full.columns:
+        full["is_injected"] = False
+    full["is_injected"] = full["is_injected"].fillna(False).astype(bool)
     full["_rt_delta"] = (full[rt_col] - full["donor_rt"]).abs()
-    full = full[full["_rt_delta"] <= params.rt_tolerance_min]
+    tol = np.where(full["is_injected"],
+                   params.injected_rt_tolerance_min,
+                   params.rt_tolerance_min)
+    full = full[full["_rt_delta"] <= tol]
 
     if full.empty:
         stats = _per_run_stats(psm_confident, rescued_counts=pd.Series(dtype=int),
@@ -155,8 +215,16 @@ def match_between_runs(psm_full: pd.DataFrame,
     rescued = rescued.copy()
     rescued["MBR"] = True
     rescued["Q.Value.MBR"] = rescued.get("Q.Value", np.nan)
-    rescued = rescued.drop(columns=["_pkey", "_ck", "_rt_delta", "donor_rt"],
-                           errors="ignore")
+    if "is_injected" in rescued.columns:
+        rescued["MBR.Source"] = np.where(
+            rescued["is_injected"].fillna(False).astype(bool),
+            "predicted_library",
+            "observed_donor",
+        )
+    rescued = rescued.drop(
+        columns=["_pkey", "_ck", "_rt_delta", "donor_rt", "is_injected"],
+        errors="ignore",
+    )
 
     merged = pd.concat([confident, rescued], ignore_index=True,
                        sort=False)
@@ -166,6 +234,14 @@ def match_between_runs(psm_full: pd.DataFrame,
     scores_col = "Score" if "Score" in rescued.columns else "Q.Value"
     scores = rescued.groupby("filename")[scores_col].median().rename("score_med")
     stats = _per_run_stats(psm_confident, counts, scores)
+    # Also surface the donor-injection diagnostic on the stats frame.
+    stats.attrs["n_injected_donors"] = n_injected
+    if "MBR.Source" in rescued.columns:
+        stats.attrs["n_rescued_from_injected"] = int(
+            (rescued["MBR.Source"] == "predicted_library").sum()
+        )
+    else:
+        stats.attrs["n_rescued_from_injected"] = 0
 
     logger.info("MBR: rescued %d precursors across %d runs (%.1f%% of confident)",
                 len(rescued), rescued["filename"].nunique(),
@@ -195,6 +271,61 @@ def _per_run_stats(confident: pd.DataFrame,
                 if run in scores.index else float("nan"),
         })
     return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# v0.5.8: predicted-library donor injection
+# ---------------------------------------------------------------------------
+
+def _injected_donor_table(predicted: pd.DataFrame,
+                          psm_full: pd.DataFrame,
+                          confident_donors: pd.DataFrame,
+                          min_runs: int) -> pd.DataFrame:
+    """Build a donor table from predicted-library precursors.
+
+    Only predicted precursors that are
+    1) NOT already in ``confident_donors``, and
+    2) observed in ``psm_full`` in at least ``min_runs`` runs (any q-value),
+    are kept. The donor RT is taken from ``Pred.RT``. This guarantees the
+    rescue path will only promote PSMs that Sage actually scored on the
+    user's data; we never invent identifications from the predicted library.
+    """
+    needed = {"Modified.Sequence", "Precursor.Charge", "Pred.RT"}
+    if not needed.issubset(predicted.columns):
+        logger.info("MBR: predicted-library donor table missing %s",
+                    needed - set(predicted.columns))
+        return pd.DataFrame()
+
+    p = predicted[["Modified.Sequence", "Precursor.Charge", "Pred.RT"]].copy()
+    p = p.dropna(subset=["Modified.Sequence", "Precursor.Charge", "Pred.RT"])
+    p["_pkey"] = (p["Modified.Sequence"].astype(str) + "@"
+                  + p["Precursor.Charge"].astype(int).astype(str))
+    p = p.drop_duplicates("_pkey")
+
+    # Drop precursors that are already confident donors.
+    if not confident_donors.empty:
+        p = p[~p["_pkey"].isin(set(confident_donors["_pkey"]))]
+    if p.empty:
+        return pd.DataFrame()
+
+    # Count how many runs see this precursor at any q-value.
+    full_keys = (psm_full["Modified.Sequence"].astype(str) + "@"
+                 + psm_full["Precursor.Charge"].astype(int).astype(str))
+    runs_per_key = (psm_full.assign(_pkey=full_keys)
+                            .groupby("_pkey")["filename"]
+                            .nunique())
+    obs = runs_per_key[runs_per_key >= max(1, int(min_runs))].index
+    p = p[p["_pkey"].isin(set(obs))]
+    if p.empty:
+        return pd.DataFrame()
+
+    out = pd.DataFrame({
+        "_pkey": p["_pkey"].values,
+        "donor_rt": p["Pred.RT"].astype(float).values,
+        "donor_n_runs": [int(runs_per_key.loc[k]) for k in p["_pkey"]],
+        "is_injected": True,
+    })
+    return out
 
 
 def _empty_stats(confident: pd.DataFrame) -> pd.DataFrame:

@@ -203,6 +203,36 @@ class DiaQuantConfig:
     # v0.5.6.  The pg_matrix and site_matrix paths are always normalised.
     normalize_precursor_matrix: bool = True
 
+    # ---- v0.5.8 (P1-b): per-condition imputation ----
+    # Group-aware missing-value imputation for the precursor / pg / site
+    # matrices. ``"none"`` (default) preserves NaNs, matching v0.5.7. Other
+    # options:
+    #   * ``"group_median"`` - fill with the median of the same experimental
+    #     group when at least ``impute_min_obs_per_group`` valid replicates
+    #     are present in that group. Lightweight and biology-safe.
+    #   * ``"group_min"`` - same but uses the per-group minimum (a common
+    #     left-censored imputation in MS proteomics).
+    #   * ``"knn"`` - per-group ``sklearn.impute.KNNImputer`` (requires
+    #     scikit-learn; fall-back to ``"group_median"`` if unavailable).
+    impute_method: str = "none"
+    impute_min_obs_per_group: int = 2
+    impute_knn_n_neighbors: int = 5
+    impute_knn_weights: str = "distance"
+    # When True (default with non-trivial impute_method), expose a column
+    # ``Intensity.Imputed.Frac`` next to the identity columns so downstream
+    # tools can re-filter rows whose imputed proportion is too high.
+    expose_imputation_flag: bool = True
+
+    # ---- v0.5.8 (P0): predicted-library MBR donor injection ----
+    # When True (default), AlphaPeptDeep predicted-library precursors are
+    # added to the MBR donor pool. Each injected donor must still be
+    # observed (any q-value) in >= ``mbr_min_injected_observed_runs`` runs
+    # before its sub-threshold PSMs are promoted, so target-decoy FDR is
+    # preserved (no PSM is invented).
+    mbr_inject_predicted_donors: bool = True
+    mbr_min_injected_observed_runs: int = 1
+    mbr_injected_rt_tol_min: float = 1.5
+
     # ---- runtime ----
     threads: int = 0                        # 0 = autodetect
     sage_binary: str = "sage"

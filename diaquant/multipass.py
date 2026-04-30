@@ -53,6 +53,9 @@ def _config_for_pass(base: DiaQuantConfig, profile: PassProfile) -> DiaQuantConf
         cfg.site_probability_cutoff = profile.site_probability_cutoff
     if profile.fragment_tol_ppm is not None:
         cfg.fragment_tol_ppm = profile.fragment_tol_ppm
+    # v0.5.8: per-pass peptide FDR (None inherits the global default).
+    if getattr(profile, "peptide_fdr", None) is not None:
+        cfg.peptide_fdr = profile.peptide_fdr
     # Each pass writes Sage results into its own subdirectory so the
     # different runs do not overwrite each other.
     cfg.output_dir = base.output_dir / f"pass_{profile.name}"

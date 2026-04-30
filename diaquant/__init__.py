@@ -31,6 +31,30 @@ Modules:
                       stub manifest on exception
 - cli:                click-based command-line interface
 
+v0.5.8 changes (the "identification sensitivity" release):
+  P0.   Predicted-library MBR donor injection.  AlphaPeptDeep predicted
+        precursors are now added to the MBR donor pool with FDR-safe
+        gating: each injected donor must have been scored by Sage at any
+        q-value in at least ``mbr_min_injected_observed_runs`` (default 1)
+        runs, so target-decoy FDR is preserved (no PSM is invented).
+        Closes the recall gap that left v0.5.7 at 50.6% UniProt-accession
+        concordance vs. DIA-NN on KIST-EPS phospho-DIA.
+  P1-a. Per-pass peptide_fdr.  All PTM-aware built-in profiles (phospho,
+        ubiquitin, acetyl_methyl, succinyl_acyl, oglcnac, citrullination,
+        lactyl_acyl) override peptide_fdr to 0.05 because the FDR
+        estimator is dominated by unmodified peptides; truncating the
+        rare modified hits at 1% q-value was cutting real phospho rows.
+        site_probability_cutoff stays at 0.75 as the localisation
+        safeguard, and whole_proteome still runs at 1% global.
+  P1-b. Group-aware imputation (``imputation.py``).  New
+        ``ImputeParams`` + ``impute_matrix`` apply per-condition median /
+        min / KNN imputation to pr_matrix / pg_matrix /
+        ptm_site_matrix, but never invent values for groups with fewer
+        than ``impute_min_obs_per_group`` valid observations.  A new
+        ``Intensity.Imputed.Frac`` column lets downstream tools
+        re-filter rows whose imputation proportion is too high.  Default
+        ``impute_method: "none"`` preserves v0.5.7 behaviour.
+
 v0.5.7 changes (the "v0.5.6 hotfix + precursor-normalization" release):
   P0-1. parse_sage_tsv now drops Sage decoys (label == -1, plus rev_/REV_/
         DECOY_ accession-prefixed rows) **before** the FDR filter.  v0.5.6
@@ -89,4 +113,4 @@ v0.5.5 changes (the "observability + PTM" release):
         ``pass_phospho/`` / cache dir so multi-pass outputs are visible.
 """
 
-__version__ = "0.5.7"
+__version__ = "0.5.8"

@@ -128,6 +128,20 @@ RUN set -eux; \
         pip install --index-url https://download.pytorch.org/whl/cpu \
             "torch==2.2.2" "torchvision==0.17.2" ; \
         pip install -e ".[deeplearning]" ; \
+        # ---- v0.5.9 P0: pin transformers/numba/numpy to AlphaPeptDeep's tested
+        # versions so peptdeep's transformer-based models can be imported.
+        # Without these pins, peptdeep>=1.4 silently pulls the latest
+        # transformers (4.50+) which moved `GenerationMixin` out of
+        # `transformers.generation` and breaks every model load with
+        # `ImportError: cannot import name 'GenerationMixin'`.
+        # See alphapeptdeep/requirements/requirements.txt (transformers==4.47.0).
+        pip install --no-cache-dir \
+            "transformers==4.47.0" "numba==0.60.0" "numpy<2" ; \
+        # ---- v0.5.9 P0: fail-fast import smoke test BEFORE downloading models.
+        # If peptdeep cannot even be imported, fail the build immediately so a
+        # broken image is never published to GHCR.  Previously this silently
+        # fell through to runtime where every job hit the same ImportError.
+        python -c "from peptdeep.pretrained_models import ModelManager; print('peptdeep import OK')" ; \
         # Download the pretrained AlphaPeptDeep transformer models once at
         # build time so `docker run` never needs network access.
         if peptdeep install-models ; then \

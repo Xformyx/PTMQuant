@@ -31,6 +31,23 @@ Modules:
                       stub manifest on exception
 - cli:                click-based command-line interface
 
+v0.5.9 changes (the "AlphaPeptDeep ABI hotfix" release):
+  P0.   Pin ``transformers==4.47.0`` (plus ``numba==0.60.0`` and
+        ``numpy<2``) in both the Docker image and the ``[deeplearning]``
+        extra.  AlphaPeptDeep was failing to import at runtime with
+        ``ImportError: cannot import name 'GenerationMixin' from
+        'transformers.generation'`` because peptdeep>=1.4 left
+        transformers unbounded and pip was resolving 4.50+, which moved
+        the symbol.  Every v0.5.8.x predicted-library / rescore / MBR
+        donor-injection job therefore silently fell back to Sage's
+        in-silico library; v0.5.8.1 made the failure visible in
+        run_manifest.json and v0.5.9 actually fixes it.
+  P0.   Build-time fail-fast smoke test (``python -c 'from
+        peptdeep.pretrained_models import ModelManager'``) added to the
+        Dockerfile so a regression of this class never reaches GHCR
+        again -- the image build itself now red-flags the ABI break
+        instead of producing a broken ``:latest`` tag.
+
 v0.5.8.1 changes (the "observability hotfix" release):
   P0.   When predicted_library is enabled but the AlphaPeptDeep import,
         model load or actual prediction silently fails (returning ``None``
@@ -128,4 +145,4 @@ v0.5.5 changes (the "observability + PTM" release):
         ``pass_phospho/`` / cache dir so multi-pass outputs are visible.
 """
 
-__version__ = "0.5.8.1"
+__version__ = "0.5.9"

@@ -30,7 +30,15 @@ dependencies = [
 
 [project.optional-dependencies]
 # PyPI package name is `peptdeep` (repo: MannLabs/alphapeptdeep); there is no `alphapeptdeep` wheel.
-deeplearning = ["peptdeep>=1.4"]
+deeplearning = [
+    "peptdeep>=1.4",
+    # Pin AlphaPeptDeep's transitive deps to versions that actually work.
+    # transformers>=4.50 moved `GenerationMixin` out of `transformers.generation`,
+    # which breaks every peptdeep model import with ImportError. See Dockerfile (v0.5.9).
+    "transformers==4.47.0",
+    "numba==0.60.0",
+    "numpy<2",
+]
 
 [project.scripts]
 ptmquant = "diaquant.cli:cli"

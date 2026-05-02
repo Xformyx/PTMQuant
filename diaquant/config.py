@@ -146,7 +146,12 @@ class DiaQuantConfig:
                                               # high-confidence PSMs before
                                               # predicting subsequent passes.
     pred_lib_transfer_epochs: int = 10        # epochs for the opt-in fine-tune.
-    pred_lib_fallback_in_silico: bool = True  # if AlphaPeptDeep prediction
+    # ``pred_lib_fallback_in_silico``: v0.5.9.1 disables the silent
+    # fallback by default at user request.  When AlphaPeptDeep prediction
+    # fails (OOM, missing weights, ABI mismatch, ...), the pipeline now
+    # raises so the operator can react instead of receiving a degraded
+    # in-silico library.  Set to True only for debugging.
+    pred_lib_fallback_in_silico: bool = False  # if AlphaPeptDeep prediction
                                               # fails, fall back to Sage's
                                               # built-in theoretical library
                                               # rather than aborting the run.
@@ -233,6 +238,55 @@ class DiaQuantConfig:
     mbr_min_injected_observed_runs: int = 1
     mbr_injected_rt_tol_min: float = 1.5
 
+    # ---- v0.5.9.1: AlphaPeptDeep memory safety ----
+    # v0.5.9 unblocked the transformers ABI so AlphaPeptDeep actually runs,
+    # which immediately exposed an OOM hot-spot in
+    # ``predicted_library.generate_predicted_library``: a whole-proteome
+    # FASTA (~21k human proteins) with max_variable_mods=2-3 produces
+    # 5-30M precursors, and ``lib.predict_all(["rt","ms2"])`` allocates
+    # a single fragment matrix proportional to that count.  On a 32GB
+    # Docker Desktop host the process is SIGKILLed (exit 137) before any
+    # output file is written.  These four knobs make AlphaPeptDeep usage
+    # OOM-safe by default while still letting power users uncap it.
+    #
+    # ``pred_lib_max_precursors``: hard upper bound on the digested
+    # precursor count.  When exceeded, the pass falls back to Sage's
+    # in-silico library and the reason is recorded in run_manifest.json.
+    # 2_000_000 is empirically safe at 24GB RSS on CPU (~12-16GB peak).
+    # ``pred_lib_max_precursors``: hard upper bound on precursor count
+    # (post-digest).  Raised in v0.5.9.1 from 2 M -> 50 M so that
+    # whole-proteome multi-PTM jobs (e.g. human + phospho STY +
+    # max_var=3 ~ 23 M precursors) are not artificially blocked.  The
+    # chunked predict path is what actually keeps memory bounded; this
+    # cap exists only to refuse pathological cases (e.g. metaproteome +
+    # max_var=5 -> 100 M+).  Set to 0 to disable the cap.
+    pred_lib_max_precursors: int = 50_000_000
+    # ``pred_lib_batch_size``: caps the peptdeep transformer mini-batch
+    # used for both RT and MS2 inference.  AlphaPeptDeep's default of
+    # 1024-4096 is GPU-tuned and oversizes CPU runs; 512 keeps each
+    # forward pass under ~2GB.
+    pred_lib_batch_size: int = 512
+    # ``pred_lib_chunk_size``: number of precursors processed in a single
+    # predict_all+translate_to_tsv pass.  v0.5.9.1 splits the digested
+    # precursor_df into chunks of this size, predicts each chunk, appends
+    # the result to the output TSV, then explicitly frees the fragment
+    # tensors before moving on.  This keeps the resident set roughly
+    # ``pred_lib_chunk_size * 232 * 4 * 2`` bytes (~1 GB per 1M chunk)
+    # regardless of how many million precursors the FASTA produces, which
+    # is what unblocks whole-proteome multi-PTM jobs on a 32-96 GB host.
+    # Set to 0 to disable chunking (legacy v0.5.9 behaviour).
+    pred_lib_chunk_size: int = 1_000_000
+    # ``pred_lib_memory_budget_gb``: minimum *available* RAM (per psutil)
+    # at the moment generate_predicted_library is called.  When the host
+    # has less than this free, the pass falls back to in-silico and the
+    # reason is surfaced to run_manifest.json.  Set to 0 to disable the
+    # pre-flight check.
+    pred_lib_memory_budget_gb: float = 12.0
+    # ``pred_lib_strict_oom``: when True, fall-back is disabled and an
+    # OOM-class condition (precursor count > max, or memory < budget)
+    # raises instead of silently degrading.  Useful for CI.
+    pred_lib_strict_oom: bool = False
+
     # ---- runtime ----
     threads: int = 0                        # 0 = autodetect
     sage_binary: str = "sage"
@@ -295,5 +349,26 @@ class DiaQuantConfig:
             cfg.pred_lib_cache_dir, Path
         ):
             cfg.pred_lib_cache_dir = Path(cfg.pred_lib_cache_dir)
+        # ---- v0.5.9.1: env-var escape hatches for memory-safety knobs ----
+        # PTM-platform / power users can override predicted-library memory
+        # caps without re-emitting the YAML, which is useful during
+        # incident response when the operator just wants to retry the
+        # same job with smaller batches.  YAML values still win.
+        _env_int = lambda name, current: int(os.environ[name]) \
+            if name in os.environ and os.environ[name].strip() else current
+        _env_float = lambda name, current: float(os.environ[name]) \
+            if name in os.environ and os.environ[name].strip() else current
+        cfg.pred_lib_max_precursors = _env_int(
+            "PTMQUANT_PEPTDEEP_MAX_PRECURSORS", cfg.pred_lib_max_precursors
+        )
+        cfg.pred_lib_batch_size = _env_int(
+            "PTMQUANT_PEPTDEEP_BATCH", cfg.pred_lib_batch_size
+        )
+        cfg.pred_lib_chunk_size = _env_int(
+            "PTMQUANT_PEPTDEEP_CHUNK", cfg.pred_lib_chunk_size
+        )
+        cfg.pred_lib_memory_budget_gb = _env_float(
+            "PTMQUANT_PEPTDEEP_MEM_BUDGET_GB", cfg.pred_lib_memory_budget_gb
+        )
         cfg.output_dir.mkdir(parents=True, exist_ok=True)
         return cfg

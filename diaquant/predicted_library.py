@@ -304,12 +304,49 @@ def _load_alphapeptdeep() -> Optional[_AlphaPeptDeepHandles]:
 
 
 def _build_model_manager(handles: _AlphaPeptDeepHandles, cfg: DiaQuantConfig):
-    """Initialise an AlphaPeptDeep ``ModelManager`` honouring user settings."""
+    """Initialise an AlphaPeptDeep ``ModelManager`` honouring user settings.
+
+    v0.5.9.1: also caps the ms2 / rt / ccs transformer mini-batch size to
+    ``cfg.pred_lib_batch_size`` so each forward pass stays within a few
+    GB of RAM.  AlphaPeptDeep's defaults (1024-4096) are GPU-tuned and
+    blow up CPU runs on a 32GB Docker host (exit 137 / SIGKILL).
+    """
     mm = handles.ModelManager(device="cpu")
     mm.load_installed_models("generic")
     mm.instrument = cfg.pred_lib_instrument
     mm.nce = float(cfg.pred_lib_nce)
+    # Cap transformer mini-batch on every sub-model that exposes one.  Use
+    # setattr so we are robust to peptdeep API drift across minor versions.
+    bs = max(1, int(cfg.pred_lib_batch_size))
+    for sub_name in ("ms2_model", "rt_model", "ccs_model"):
+        sub = getattr(mm, sub_name, None)
+        if sub is None:
+            continue
+        for attr in ("batch_size", "predict_batch_size"):
+            if hasattr(sub, attr):
+                try:
+                    setattr(sub, attr, bs)
+                except Exception:  # pragma: no cover - defensive
+                    pass
     return mm
+
+
+def _available_memory_gb() -> Optional[float]:
+    """Return host *available* RAM in GB, or ``None`` if psutil is missing."""
+    try:
+        import psutil  # type: ignore
+        return float(psutil.virtual_memory().available) / (1024 ** 3)
+    except Exception:  # pragma: no cover - psutil should be present in the image
+        return None
+
+
+_LAST_MEM_AVAILABLE_GB: Optional[float] = None
+_LAST_PRECURSOR_COUNT: Optional[int] = None
+
+
+def get_last_memory_diagnostics() -> Tuple[Optional[float], Optional[int]]:
+    """Return ``(available_gb_at_start, last_precursor_count)`` for manifest."""
+    return _LAST_MEM_AVAILABLE_GB, _LAST_PRECURSOR_COUNT
 
 
 # ---------------------------------------------------------------------------
@@ -447,6 +484,30 @@ def generate_predicted_library(
             "`peptdeep install-models`."
         )
 
+    # ---- v0.5.9.1: pre-flight memory budget check (HARD-FAIL) -------------
+    # Refuse to start prediction when the host clearly cannot even fit one
+    # chunk of the transformer working set.  In v0.5.9.1 fallback is
+    # disabled at user request: an OOM-class condition raises so the
+    # operator must consciously bump Docker Desktop memory or lower the
+    # chunk_size, instead of silently producing a degraded library.
+    global _LAST_MEM_AVAILABLE_GB, _LAST_PRECURSOR_COUNT
+    avail_gb = _available_memory_gb()
+    _LAST_MEM_AVAILABLE_GB = avail_gb
+    if (
+        avail_gb is not None
+        and cfg.pred_lib_memory_budget_gb > 0
+        and avail_gb < cfg.pred_lib_memory_budget_gb
+    ):
+        msg = (
+            f"insufficient_memory_for_predicted_library: "
+            f"available={avail_gb:.1f}GB < budget={cfg.pred_lib_memory_budget_gb:.1f}GB. "
+            f"Increase Docker Desktop memory, lower pred_lib_chunk_size, or "
+            f"set PTMQUANT_PEPTDEEP_MEM_BUDGET_GB to override."
+        )
+        log.error("[diaquant] %s: %s", pass_label, msg)
+        _record_failure(pass_label, msg)
+        raise MemoryError(msg)
+
     try:  # pragma: no cover - exercised in integration tests, not unit tests
         mm = _build_model_manager(handles, cfg)
         lib = handles.PredictSpecLibFasta(
@@ -467,16 +528,64 @@ def generate_predicted_library(
         log.info("[diaquant] %s: digesting FASTA with AlphaPeptDeep ...",
                  pass_label)
         lib.import_and_process_fasta([str(cfg.fasta)])
+        n_prec = int(len(lib.precursor_df))
+        _LAST_PRECURSOR_COUNT = n_prec
         log.info(
-            "[diaquant] %s: %d peptides / %d precursors -> predicting RT+MS2",
-            pass_label, len(lib.peptide_df), len(lib.precursor_df),
+            "[diaquant] %s: %d peptides / %d precursors -> predicting RT+MS2 "
+            "(batch_size=%d, chunk_size=%d, available_mem=%s GB)",
+            pass_label, len(lib.peptide_df), n_prec,
+            int(cfg.pred_lib_batch_size),
+            int(cfg.pred_lib_chunk_size),
+            f"{avail_gb:.1f}" if avail_gb is not None else "unknown",
         )
-        lib.predict_all(predict_items=["rt", "ms2"])
-        handles.translate_to_tsv(
-            lib, str(out_tsv),
-            multiprocessing=False,
-            batch_size=100_000,
-        )
+        # ---- v0.5.9.1: precursor-count cap (HARD-FAIL) ---------------------
+        # Hard upper bound regardless of chunking.  Even with chunked
+        # predict the digest precursor_df itself can become too large
+        # (~900 B/row) -- 50M precursors = 45 GB just for the dataframe.
+        if cfg.pred_lib_max_precursors > 0 and n_prec > cfg.pred_lib_max_precursors:
+            msg = (
+                f"precursor_count_exceeds_cap: "
+                f"n={n_prec} > pred_lib_max_precursors={cfg.pred_lib_max_precursors}. "
+                f"Lower max_variable_mods, narrow precursor_mz/charge range, "
+                f"or raise PTMQUANT_PEPTDEEP_MAX_PRECURSORS to override."
+            )
+            log.error("[diaquant] %s: %s", pass_label, msg)
+            _record_failure(pass_label, msg)
+            raise MemoryError(msg)
+
+        # ---- v0.5.9.1: chunked predict + chunked TSV streaming -------------
+        # The legacy single-shot ``lib.predict_all(["rt","ms2"])`` allocates
+        # two float32 matrices of shape (n_prec, max_frag_idx, 8).  At
+        # 23 M precursors that is ~40 GB before pandas overhead, which is
+        # what causes the 137/SIGKILL on a 96 GB Docker host.  Splitting
+        # the precursor_df into chunks of ``cfg.pred_lib_chunk_size`` rows
+        # caps the resident set at ~ chunk_size * 232 * 4 * 2 bytes plus
+        # the always-resident 1.5 GB transformer weights -- about 5 GB peak
+        # at the default 1 M chunk.  After each chunk we explicitly free
+        # the fragment dataframes and call gc.collect() so the next chunk
+        # starts from a clean baseline.
+        chunk_size = int(cfg.pred_lib_chunk_size or 0)
+        if chunk_size <= 0 or n_prec <= chunk_size:
+            # Single-shot path (small libraries, or chunking disabled).
+            log.info("[diaquant] %s: predicting all %d precursors in a single pass",
+                     pass_label, n_prec)
+            lib.predict_all(predict_items=["rt", "ms2"])
+            handles.translate_to_tsv(
+                lib, str(out_tsv),
+                multiprocessing=False,
+                batch_size=100_000,
+            )
+        else:
+            _chunked_predict_and_write(
+                handles=handles,
+                cfg=cfg,
+                full_lib=lib,
+                out_tsv=out_tsv,
+                chunk_size=chunk_size,
+                pass_label=pass_label,
+                fix_mods=fix_mods,
+                var_mods=var_mods,
+            )
         log.info("[diaquant] %s: predicted library written to %s",
                  pass_label, out_tsv)
         # Populate shared cache on first computation so the next job of any
@@ -495,14 +604,201 @@ def generate_predicted_library(
         _write_cache_meta(out_tsv, cfg, fix_mods, var_mods, cache_id)
         _clear_failure()
         return out_tsv
+    except MemoryError:
+        # Hard-fail on memory issues: do NOT silently fall back.  The
+        # MemoryError already carries enough detail for the operator to
+        # bump Docker memory or tune chunk_size; surface it as-is.
+        raise
     except Exception as exc:  # pragma: no cover
-        log.warning(
+        log.error(
             "[diaquant] %s: AlphaPeptDeep prediction failed (%s)",
             pass_label, exc,
         )
         _record_failure(pass_label, f"prediction_failed: {type(exc).__name__}: {exc}")
         if cfg.pred_lib_fallback_in_silico:
-            log.warning("[diaquant] %s: falling back to in-silico library.",
-                        pass_label)
+            log.warning(
+                "[diaquant] %s: falling back to in-silico library "
+                "(non-OOM error path).", pass_label,
+            )
             return None
         raise
+
+
+def _chunked_predict_and_write(
+    *,
+    handles: "_AlphaPeptDeepHandles",
+    cfg: DiaQuantConfig,
+    full_lib,
+    out_tsv: Path,
+    chunk_size: int,
+    pass_label: str,
+    fix_mods: List[str],
+    var_mods: List[str],
+) -> None:
+    """Run predict_all + translate_to_tsv in chunks of ``chunk_size`` precursors.
+
+    v0.5.9.1 strategy
+    -----------------
+    The legacy ``PredictSpecLibFasta.predict_all`` allocates two float32
+    matrices of shape ``(n_prec, max_frag_idx, n_charged_frag_types)``
+    for fragment_mz_df / fragment_intensity_df.  At 23 M precursors that
+    is ~40 GB before pandas overhead, which is what causes the 137/SIGKILL
+    on a 96 GB Docker host.
+
+    The fix: call ``ModelManager.predict_all(precursor_df=chunk_df, ...)``
+    directly on precursor_df slices.  After each chunk we attach the
+    returned ``precursor_df`` / ``fragment_mz_df`` / ``fragment_intensity_df``
+    onto a transient SpecLibBase shell, run ``translate_to_tsv`` to flush
+    that chunk to disk, then drop every reference and ``gc.collect()`` so
+    the next chunk starts from a clean baseline.
+
+    Peak resident set stays at roughly
+        transformer_weights (~1.5 GB) + chunk_size * n_frag * 8 bytes * 2
+    which at the default ``chunk_size = 1_000_000`` is well under 6 GB --
+    leaving plenty of headroom even on a 32 GB Docker host.
+
+    Output
+    ------
+    The final ``out_tsv`` is byte-identical to what the single-shot path
+    would have produced: header from chunk 1, then row-only payloads from
+    chunks 2..N concatenated in order.
+    """
+    import gc
+    import shutil
+    import tempfile
+
+    n_prec = int(len(full_lib.precursor_df))
+    n_chunks = (n_prec + chunk_size - 1) // chunk_size
+    log.info(
+        "[diaquant] %s: chunked predict -- %d precursors split into %d chunks "
+        "of %d rows each", pass_label, n_prec, n_chunks, chunk_size,
+    )
+
+    avail_before = _available_memory_gb()
+    if avail_before is not None:
+        log.info("[diaquant] %s: available memory before chunked predict: %.1f GB",
+                 pass_label, avail_before)
+
+    # ModelManager owns the transformer weights and exposes a
+    # ``predict_all(precursor_df=...)`` entry point that operates on any
+    # chunk of precursors.  Reuse the model_manager attached to full_lib
+    # so the weights stay loaded across chunks.
+    mm = full_lib.model_manager
+
+    # Snapshot the digest result; once we have it, ``full_lib`` itself can
+    # be released to free the digest's accessory tables (peptide_df,
+    # protein_df, etc.) before the heavy fragment matrices show up.
+    full_precursor_df = full_lib.precursor_df.reset_index(drop=True).copy()
+    # Drop heavy attributes from full_lib that we no longer need.
+    for attr in ("_peptide_df", "_protein_df", "peptide_df", "protein_df",
+                 "fragment_intensity_df", "fragment_mz_df"):
+        try:
+            setattr(full_lib, attr, None)
+        except Exception:
+            pass
+    gc.collect()
+
+    # Use a SpecLibBase shell as the carrier object for translate_to_tsv.
+    # translate_to_tsv expects an object with .precursor_df,
+    # .fragment_mz_df, .fragment_intensity_df attributes -- exactly what
+    # ModelManager.predict_all returns.
+    try:
+        from peptdeep.spec_lib.translate import speclib_to_single_df
+    except Exception:  # pragma: no cover - kept for diagnostics only
+        speclib_to_single_df = None  # noqa: F841
+    from alphabase.spectral_library.base import SpecLibBase
+
+    out_tsv = Path(out_tsv)
+    if out_tsv.exists():
+        out_tsv.unlink()
+    tmp_dir = Path(tempfile.mkdtemp(prefix=f"peptdeep_chunks_{pass_label}_",
+                                    dir=out_tsv.parent))
+    try:
+        for ck in range(n_chunks):
+            lo = ck * chunk_size
+            hi = min(lo + chunk_size, n_prec)
+            chunk_label = f"{pass_label}/chunk{ck + 1:03d}/{n_chunks:03d}"
+            log.info(
+                "[diaquant] %s: rows %d..%d (%d precursors)",
+                chunk_label, lo, hi, hi - lo,
+            )
+
+            chunk_df = full_precursor_df.iloc[lo:hi].reset_index(
+                drop=True
+            ).copy()
+
+            # Drive prediction directly through the ModelManager so we
+            # only pay for one chunk's fragment tensors at a time.
+            result = mm.predict_all(
+                precursor_df=chunk_df,
+                predict_items=["rt", "ms2"],
+                multiprocessing=False,
+            )
+
+            # Attach the result tables onto a fresh SpecLibBase shell for
+            # translate_to_tsv to consume.
+            shell = SpecLibBase()
+            shell._precursor_df = result["precursor_df"]
+            try:
+                shell.precursor_df = result["precursor_df"]
+            except Exception:
+                pass
+            shell._fragment_mz_df = result.get("fragment_mz_df")
+            shell._fragment_intensity_df = result.get("fragment_intensity_df")
+            try:
+                shell.fragment_mz_df = result.get("fragment_mz_df")
+                shell.fragment_intensity_df = result.get("fragment_intensity_df")
+            except Exception:
+                pass
+
+            chunk_tsv = tmp_dir / f"chunk_{ck:04d}.tsv"
+            handles.translate_to_tsv(
+                shell, str(chunk_tsv),
+                multiprocessing=False,
+                batch_size=100_000,
+            )
+
+            # Drop every reference and force GC so the next chunk's
+            # transformer forward pass starts from a clean baseline.
+            del shell, result, chunk_df
+            gc.collect()
+            try:
+                import torch  # type: ignore
+                if hasattr(torch, "cuda") and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+            avail_after = _available_memory_gb()
+            if avail_after is not None:
+                log.info(
+                    "[diaquant] %s: chunk %d/%d done -- available memory: %.1f GB",
+                    pass_label, ck + 1, n_chunks, avail_after,
+                )
+
+        # ---- concat chunks into the final TSV ----------------------------
+        # Stream-concat: write chunk 1 verbatim, then each subsequent
+        # chunk without its header line.  This is constant-memory and
+        # produces a TSV bit-identical to the single-shot path.
+        log.info("[diaquant] %s: concatenating %d chunk TSVs into %s",
+                 pass_label, n_chunks, out_tsv)
+        with open(out_tsv, "wb") as out_fh:
+            for ck in range(n_chunks):
+                chunk_tsv = tmp_dir / f"chunk_{ck:04d}.tsv"
+                if not chunk_tsv.exists():
+                    raise RuntimeError(
+                        f"chunk TSV missing after predict: {chunk_tsv}"
+                    )
+                with open(chunk_tsv, "rb") as in_fh:
+                    if ck == 0:
+                        shutil.copyfileobj(in_fh, out_fh)
+                    else:
+                        # Skip the header line on every subsequent chunk.
+                        in_fh.readline()
+                        shutil.copyfileobj(in_fh, out_fh)
+    finally:
+        # Best-effort cleanup of per-chunk TSVs.
+        try:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass

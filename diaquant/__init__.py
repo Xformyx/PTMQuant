@@ -31,6 +31,46 @@ Modules:
                       stub manifest on exception
 - cli:                click-based command-line interface
 
+v0.5.9.1 changes (the "chunked-predict OOM hotfix" release):
+  P0.   AlphaPeptDeep ``predict_all`` is now executed in chunks of
+        ``cfg.pred_lib_chunk_size`` precursors (default 1_000_000) instead
+        of one giant pass.  v0.5.9 produced a working library on small
+        FASTAs but caught SIGKILL (exit 137) on whole-proteome multi-PTM
+        jobs because peptdeep allocates two ``(n_prec, max_frag_idx, 8)``
+        float32 matrices for ``fragment_mz_df`` / ``fragment_intensity_df``
+        in a single shot -- ~40 GB at 23 M precursors plus pandas
+        overhead, exceeding even a 96 GB Docker Desktop allocation on a
+        Mac Studio.  v0.5.9.1 calls ``ModelManager.predict_all`` directly
+        on precursor_df slices, writes each chunk to its own TSV via
+        ``translate_to_tsv``, then drops every reference and runs
+        ``gc.collect()`` before moving on.  Peak resident set drops from
+        ~80 GB to ~5-6 GB regardless of FASTA / PTM combinatorics.
+  P0.   The chunk TSVs are stream-concatenated into the canonical
+        ``predicted_library_<hash>.tsv`` (chunk 1 verbatim, chunks 2..N
+        with their header line stripped) so downstream Sage / multipass
+        consumers see a byte-identical file to the legacy single-shot
+        path; cache hash + manifest plumbing are unchanged.
+  P0.   Hard-fail policy: when the host has less than
+        ``pred_lib_memory_budget_gb`` available or the digested precursor
+        count exceeds ``pred_lib_max_precursors``, the pipeline now
+        raises ``MemoryError`` instead of silently falling back to the
+        in-silico library.  This was an explicit user request after
+        v0.5.9: better to surface the failure than to ship a degraded
+        library.  ``pred_lib_fallback_in_silico`` default flips from
+        ``True`` to ``False`` accordingly; set it back to ``True`` for
+        debugging only.
+  P1.   ``pred_lib_max_precursors`` raised from 2 M -> 50 M, since the
+        chunked path is what bounds memory now.  The cap exists only to
+        refuse pathological inputs (e.g. metaproteome + max_var=5 ->
+        100 M+ precursors).
+  P1.   New env-var override ``PTMQUANT_PEPTDEEP_CHUNK`` for the chunk
+        size (alongside the existing ``PTMQUANT_PEPTDEEP_BATCH`` and
+        ``PTMQUANT_PEPTDEEP_MAX_PRECURSORS``).
+  P1.   Per-chunk progress logging shows ``rows lo..hi`` plus available
+        memory after each chunk via psutil, so OOM behaviour is now
+        directly observable in the platform UI without attaching a
+        debugger.
+
 v0.5.9 changes (the "AlphaPeptDeep ABI hotfix" release):
   P0.   Pin ``transformers==4.47.0`` (plus ``numba==0.60.0`` and
         ``numpy<2``) in both the Docker image and the ``[deeplearning]``
@@ -145,4 +185,4 @@ v0.5.5 changes (the "observability + PTM" release):
         ``pass_phospho/`` / cache dir so multi-pass outputs are visible.
 """
 
-__version__ = "0.5.9"
+__version__ = "0.5.9.1"

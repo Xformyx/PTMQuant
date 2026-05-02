@@ -181,14 +181,34 @@ def write_run_manifest(
     pl_reason_pass: Optional[str] = None
     peptdeep_ok: Optional[bool] = None
     peptdeep_detail: Optional[str] = None
+    # v0.5.9.1: also surface the memory + precursor-count snapshot taken at
+    # the moment generate_predicted_library was called, so an exit-137 OOM
+    # in a *later* component (rescore / MBR / directLFQ) can be triaged
+    # against the host's free memory budget.
+    mem_available_gb_at_pl: Optional[float] = None
+    pl_precursor_count: Optional[int] = None
     try:
         from .predicted_library import (
             get_last_failure as _get_last_failure,
             peptdeep_self_check as _peptdeep_self_check,
+            get_last_memory_diagnostics as _get_last_mem,
         )
         pl_reason, pl_reason_pass = _get_last_failure()
         peptdeep_ok, peptdeep_detail = _peptdeep_self_check()
+        mem_available_gb_at_pl, pl_precursor_count = _get_last_mem()
     except Exception:  # pragma: no cover - import quirk only
+        pass
+
+    # v0.5.9.1: snapshot the *current* host RAM so the manifest is useful
+    # even when AlphaPeptDeep was never reached (e.g. Sage OOM, fasta load).
+    mem_total_gb: Optional[float] = None
+    mem_available_gb_now: Optional[float] = None
+    try:
+        import psutil  # type: ignore
+        vm = psutil.virtual_memory()
+        mem_total_gb = round(vm.total / (1024 ** 3), 2)
+        mem_available_gb_now = round(vm.available / (1024 ** 3), 2)
+    except Exception:
         pass
 
     # Read the build-time peptdeep self-check result baked into the image.
@@ -208,6 +228,13 @@ def write_run_manifest(
         "peptdeep_importable": peptdeep_ok,
         "peptdeep_detail": peptdeep_detail,
         "peptdeep_build_status": peptdeep_build_status,
+        # v0.5.9.1: memory + precursor-count snapshot at predict_all time
+        "memory_available_gb_at_start": mem_available_gb_at_pl,
+        "memory_budget_gb": float(getattr(cfg, "pred_lib_memory_budget_gb", 0.0)),
+        "precursor_count": pl_precursor_count,
+        "max_precursors": int(getattr(cfg, "pred_lib_max_precursors", 0)),
+        "batch_size": int(getattr(cfg, "pred_lib_batch_size", 0)),
+        "chunk_size": int(getattr(cfg, "pred_lib_chunk_size", 0)),
     }
     if (not predicted_library_applied) and pl_reason:
         pl_block["reason"] = pl_reason
@@ -248,7 +275,14 @@ def write_run_manifest(
         "config_yaml_copy": copied_yaml,
         "env": {
             "PTMQUANT_LIB_CACHE_DIR": os.environ.get("PTMQUANT_LIB_CACHE_DIR"),
+            "PTMQUANT_PEPTDEEP_BATCH": os.environ.get("PTMQUANT_PEPTDEEP_BATCH"),
+            "PTMQUANT_PEPTDEEP_MAX_PRECURSORS": os.environ.get("PTMQUANT_PEPTDEEP_MAX_PRECURSORS"),
+            "PTMQUANT_PEPTDEEP_MEM_BUDGET_GB": os.environ.get("PTMQUANT_PEPTDEEP_MEM_BUDGET_GB"),
             "HOSTNAME": os.environ.get("HOSTNAME"),
+        },
+        "host": {
+            "memory_total_gb": mem_total_gb,
+            "memory_available_gb_at_manifest": mem_available_gb_now,
         },
         "effective_config": _json_safe(cfg),
         "predicted_library": pl_block,

@@ -31,6 +31,35 @@ Modules:
                       stub manifest on exception
 - cli:                click-based command-line interface
 
+v0.5.9.2 changes (the "directLFQ-dask quantification hotfix" release):
+  P0.   directLFQ-based protein and site quantification now runs with
+        ``dask`` parallelism on a worker pool sized by
+        ``cfg.quant_num_cores`` / ``PTMQUANT_QUANT_CORES`` /
+        ``os.cpu_count()`` (capped at 16).  Without this, v0.5.9.1
+        completed every step except the final 5%, where
+        ``estimate_protein_intensities`` ran single-threaded against the
+        much larger PSM pool that v0.5.9.1's working AlphaPeptDeep
+        predicted_library produced.  A 12-mzML phospho job on KIST-EPS
+        consumed >15 hours and 56 GB RAM at 50% CPU before the operator
+        stopped it.  ``num_cores`` is now resolved up-front and passed
+        explicitly to ``estimate_protein_intensities`` instead of relying
+        on directLFQ's silent fallback to single-threaded when dask is
+        absent.  Expected speedup on a 16-core Mac Studio: 5-10x with
+        peak RSS dropping from 56 GB to ~10 GB because dask processes
+        proteins in chunks.
+  P0.   The Docker image now installs ``dask[dataframe]>=2024.5`` and
+        runs a ``import dask, dask.dataframe`` smoke test so a
+        regression of this acceleration cannot reach GHCR.  When the
+        host pip image is built without dask, the runtime emits a loud
+        warning at every directLFQ call.
+  P1.   Added ``[quantify-protein|site|pr_norm]`` progress logs at
+        start / after normalisation / after estimation with elapsed
+        wall-clock seconds and the resolved core count.  Operators can
+        now distinguish "hung" from "slow" without attaching py-spy.
+  P1.   ``cfg.quant_num_cores`` (env override
+        ``PTMQUANT_QUANT_CORES``) lets the operator clamp the worker
+        pool when the host is shared with other workloads.
+
 v0.5.9.1 changes (the "chunked-predict OOM hotfix" release):
   P0.   AlphaPeptDeep ``predict_all`` is now executed in chunks of
         ``cfg.pred_lib_chunk_size`` precursors (default 1_000_000) instead
@@ -185,4 +214,4 @@ v0.5.5 changes (the "observability + PTM" release):
         ``pass_phospho/`` / cache dir so multi-pass outputs are visible.
 """
 
-__version__ = "0.5.9.1"
+__version__ = "0.5.9.2"

@@ -137,6 +137,19 @@ RUN set -eux; \
         # See alphapeptdeep/requirements/requirements.txt (transformers==4.47.0).
         pip install --no-cache-dir \
             "transformers==4.47.0" "numba==0.60.0" "numpy<2" ; \
+        # ---- v0.5.9.2 P0: install dask so directLFQ uses parallel
+        # protein-intensity estimation.  Without it directLFQ falls back
+        # to a single-threaded path and a 50k-precursor x 12-sample
+        # phospho job can take 15+ hours in the final 95% step (observed
+        # in the field on a 16-core Mac Studio @ 96GB).  With dask the
+        # same step runs 5-10x faster and peak RSS drops because dask
+        # processes proteins in chunks instead of loading the full pivot
+        # at once.
+        pip install --no-cache-dir \
+            "dask[dataframe]>=2024.5" ; \
+        # ---- v0.5.9.2 P0: fail-fast smoke test for the dask path so a
+        # regression of this acceleration never reaches GHCR.
+        python -c "import dask, dask.dataframe; print('dask path OK, dask=' + dask.__version__)" ; \
         # ---- v0.5.9 P0: fail-fast import smoke test BEFORE downloading models.
         # If peptdeep cannot even be imported, fail the build immediately so a
         # broken image is never published to GHCR.  Previously this silently

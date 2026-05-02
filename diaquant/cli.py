@@ -510,12 +510,19 @@ def run(cfg_path: str, resume: bool) -> None:
     else:
         click.echo("[diaquant] precursor matrix: raw apex area (un-normalised)")
         pr_wide = precursor_matrix(long_df)
-    pg_lfq = protein_quant(long_df, min_samples=cfg.quant_min_samples)
+    # v0.5.9.2: thread cfg.quant_num_cores into directLFQ so the protein and
+    # site quant steps actually parallelise.  Without this v0.5.9.1 jobs
+    # spent 15+ hours stuck at 95% on a single thread.  See quantify._run_lfq_on_df.
+    _quant_cores = getattr(cfg, "quant_num_cores", None)
+    click.echo(f"[diaquant] quantification: directLFQ with cores={_quant_cores or 'auto'}")
+    pg_lfq = protein_quant(long_df, min_samples=cfg.quant_min_samples,
+                           num_cores=_quant_cores)
     site_lfq = site_quant(
         long_df,
         min_samples=cfg.quant_min_samples,
         localization_cutoff=cfg.site_probability_cutoff,
         include_low_loc=getattr(cfg, "include_low_loc_sites", False),
+        num_cores=_quant_cores,
     )
 
     out = cfg.output_dir

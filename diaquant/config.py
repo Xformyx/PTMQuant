@@ -276,6 +276,13 @@ class DiaQuantConfig:
     # is what unblocks whole-proteome multi-PTM jobs on a 32-96 GB host.
     # Set to 0 to disable chunking (legacy v0.5.9 behaviour).
     pred_lib_chunk_size: int = 1_000_000
+    # ``quant_num_cores``: directLFQ parallelism for protein and site
+    # quantification.  v0.5.9.2 ships dask in the image and resolves this
+    # via PTMQUANT_QUANT_CORES env var or os.cpu_count() (capped at 16)
+    # when None.  Set explicitly to override.  In v0.5.9.1 directLFQ ran
+    # single-threaded because num_cores=None + missing dask -> a 23M-
+    # precursor phospho job took 15+ hours in the final 95% step.
+    quant_num_cores: Optional[int] = None
     # ``pred_lib_memory_budget_gb``: minimum *available* RAM (per psutil)
     # at the moment generate_predicted_library is called.  When the host
     # has less than this free, the pass falls back to in-silico and the
@@ -367,6 +374,12 @@ class DiaQuantConfig:
         cfg.pred_lib_chunk_size = _env_int(
             "PTMQUANT_PEPTDEEP_CHUNK", cfg.pred_lib_chunk_size
         )
+        # v0.5.9.2: PTMQUANT_QUANT_CORES overrides directLFQ parallelism.
+        if "PTMQUANT_QUANT_CORES" in os.environ and os.environ["PTMQUANT_QUANT_CORES"].strip():
+            try:
+                cfg.quant_num_cores = max(1, int(os.environ["PTMQUANT_QUANT_CORES"].strip()))
+            except ValueError:
+                pass
         cfg.pred_lib_memory_budget_gb = _env_float(
             "PTMQUANT_PEPTDEEP_MEM_BUDGET_GB", cfg.pred_lib_memory_budget_gb
         )

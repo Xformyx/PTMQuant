@@ -993,7 +993,7 @@ def test_verify_ptmquant_passes_for_healthy_output(tmp_path):
     import sys
 
     (tmp_path / "run_manifest.json").write_text(json.dumps({
-        "diaquant_version": "0.5.9.1",
+        "diaquant_version": "0.5.9.2",
         "predicted_library": {"applied": True, "paths": ["p.tsv"]},
         "rescoring": {"configured": True, "applied": True},
         "mbr": {"configured": True, "applied": True, "n_rescued": 12},
@@ -1335,7 +1335,7 @@ def test_v0581_predicted_library_reason_in_manifest(tmp_path):
     p = write_run_manifest(
         out_dir=tmp_path / "out",
         cfg=cfg,
-        diaquant_version="0.5.9.1",
+        diaquant_version="0.5.9.2",
         config_yaml_src=tmp_path / "fake.cfg",
         library_paths=[],
         n_psms_raw=1000,
@@ -1373,7 +1373,7 @@ def test_v0581_peptdeep_self_check_keys_present(tmp_path):
     p = write_run_manifest(
         out_dir=tmp_path / "out",
         cfg=cfg,
-        diaquant_version="0.5.9.1",
+        diaquant_version="0.5.9.2",
         config_yaml_src=tmp_path / "fake.cfg",
         library_paths=[],
         n_psms_raw=0, n_psms_rescored=0, n_psms_after_fdr=0,

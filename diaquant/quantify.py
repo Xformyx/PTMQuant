@@ -34,6 +34,8 @@ v0.5.5 changes
 from __future__ import annotations
 
 import logging
+import os
+import time
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -42,6 +44,41 @@ import pandas as pd
 from .ptm_localization import _normalise_tag, iter_site_entries
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_quant_num_cores(default: Optional[int] = None) -> int:
+    """Return the number of cores directLFQ should use.
+
+    Resolution order (v0.5.9.2):
+      1. ``PTMQUANT_QUANT_CORES`` environment variable, if a positive int.
+      2. The ``default`` argument (typically from ``cfg.quant_num_cores``).
+      3. ``os.cpu_count()`` clamped to >= 1, capped at 16 to avoid the
+         dask scheduler thrashing on >32-core hosts (the marginal gain
+         past 16 workers is negligible for KIST-EPS-sized jobs).
+    """
+    env = os.environ.get("PTMQUANT_QUANT_CORES", "").strip()
+    if env:
+        try:
+            n = int(env)
+            if n > 0:
+                return n
+        except ValueError:
+            logger.warning("PTMQUANT_QUANT_CORES=%r is not an integer; ignored.", env)
+    if default is not None and default > 0:
+        return int(default)
+    n = os.cpu_count() or 1
+    return max(1, min(n, 16))
+
+
+def _detect_dask() -> Optional[str]:
+    """Return the dask version string when available, else ``None``.  Used to
+    surface in logs whether directLFQ will run multi-threaded or fall back to
+    its single-threaded path."""
+    try:
+        import dask  # type: ignore
+        return getattr(dask, "__version__", "unknown")
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -60,8 +97,26 @@ def _to_lfq_input(df: pd.DataFrame, protein_col: str,
     return pivot
 
 
-def _run_lfq_on_df(lfq_in: pd.DataFrame, min_samples: int) -> pd.DataFrame:
-    """Run directLFQ normalization + protein estimation on a pivoted DataFrame."""
+def _run_lfq_on_df(lfq_in: pd.DataFrame, min_samples: int,
+                   num_cores: Optional[int] = None,
+                   stage: str = "protein") -> pd.DataFrame:
+    """Run directLFQ normalization + protein estimation on a pivoted DataFrame.
+
+    v0.5.9.2 changes:
+    * ``num_cores`` is now resolved up-front (env -> arg -> cpu_count) and
+      passed explicitly to ``estimate_protein_intensities`` so directLFQ
+      actually parallelises.  Previously ``num_cores=None`` left the
+      decision to dask, which silently fell back to a single thread when
+      dask was missing.  v0.5.9.2 also installs ``dask`` in the image so
+      both halves of this acceleration are guaranteed.
+    * Progress logs (``[quantify-<stage>] ...``) are emitted at start /
+      after normalisation / after estimation with elapsed seconds, so
+      operators can distinguish "hung" from "slow" without attaching a
+      debugger.  Without this, v0.5.9.1 jobs stuck at 95% gave no
+      indication of life.
+    * The dask version is reported in the start-line so missing dask is
+      visible at a glance.
+    """
     import directlfq.utils as lfqutils
     import directlfq.normalization as lfqnorm
     import directlfq.protein_intensity_estimation as lfqprot
@@ -76,29 +131,61 @@ def _run_lfq_on_df(lfq_in: pd.DataFrame, min_samples: int) -> pd.DataFrame:
     df = lfqutils.remove_allnan_rows_input_df(df)
 
     if df.empty:
+        logger.info("[quantify-%s] empty input after dedup, skipping directLFQ", stage)
         return pd.DataFrame()
 
+    n_cores = _resolve_quant_num_cores(num_cores)
+    dask_ver = _detect_dask()
+    n_proteins = int(df["protein"].nunique()) if "protein" in df.columns else -1
+    n_ions = int(df["ion"].nunique()) if "ion" in df.columns else -1
+    logger.info(
+        "[quantify-%s] starting directLFQ: %d proteins x %d ions, cores=%d, dask=%s",
+        stage, n_proteins, n_ions, n_cores, dask_ver or "NOT_INSTALLED",
+    )
+    if dask_ver is None:
+        logger.warning(
+            "[quantify-%s] dask is NOT installed; directLFQ will run single-threaded "
+            "and may take 10-50x longer.  Install with `pip install dask[dataframe]` "
+            "or use ghcr.io/xformyx/ptmquant:>=0.5.9.2 which bundles dask.",
+            stage,
+        )
+
+    t0 = time.monotonic()
     try:
         df = lfqnorm.NormalizationManagerSamplesOnSelectedProteins(
             df, num_samples_quadratic=50
         ).complete_dataframe
+        logger.info("[quantify-%s] normalization done in %.1fs", stage, time.monotonic() - t0)
     except Exception as exc:
-        logger.warning("directLFQ normalization failed (%s); skipping normalization.", exc)
+        logger.warning("[quantify-%s] directLFQ normalization failed (%s); skipping normalization.",
+                       stage, exc)
 
+    t1 = time.monotonic()
     protein_df, _ = lfqprot.estimate_protein_intensities(
         df,
         min_nonan=min_samples,
         num_samples_quadratic=10,
-        num_cores=None,
+        num_cores=n_cores,
+    )
+    logger.info(
+        "[quantify-%s] estimate_protein_intensities done in %.1fs (rows=%d)",
+        stage, time.monotonic() - t1, len(protein_df),
     )
     return protein_df
 
 
 def protein_quant(precursor_long: pd.DataFrame,
-                  min_samples: int = 1) -> pd.DataFrame:
-    """Roll precursor intensities up to protein-group LFQ values."""
+                  min_samples: int = 1,
+                  num_cores: Optional[int] = None) -> pd.DataFrame:
+    """Roll precursor intensities up to protein-group LFQ values.
+
+    ``num_cores`` (v0.5.9.2): when ``None``, resolve via
+    ``PTMQUANT_QUANT_CORES`` env var or ``os.cpu_count()`` (capped at 16).
+    Pass an explicit positive int to override.
+    """
     lfq_in = _to_lfq_input(precursor_long, protein_col="Protein.Group")
-    return _run_lfq_on_df(lfq_in, min_samples=min_samples)
+    return _run_lfq_on_df(lfq_in, min_samples=min_samples,
+                          num_cores=num_cores, stage="protein")
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +217,8 @@ def site_quant(precursor_long: pd.DataFrame,
                localization_cutoff: float = 0.0,
                include_low_loc: bool = False,
                phospho_only: bool = True,
-               allowed_mods: Optional[List[str]] = None) -> pd.DataFrame:
+               allowed_mods: Optional[List[str]] = None,
+               num_cores: Optional[int] = None) -> pd.DataFrame:
     """Roll precursors up to PTM-site level using absolute protein positions.
 
     Parameters
@@ -255,7 +343,8 @@ def site_quant(precursor_long: pd.DataFrame,
         # Multiple sites on one precursor contribute the same intensity but
         # different site keys; directLFQ handles that correctly.
         lfq_in = _to_lfq_input(site_df, protein_col="Protein.Group")
-        site_lfq = _run_lfq_on_df(lfq_in, min_samples=min_samples)
+        site_lfq = _run_lfq_on_df(lfq_in, min_samples=min_samples,
+                                   num_cores=num_cores, stage="site")
 
         if not site_lfq.empty:
             loc = (site_df.groupby("Protein.Group")["Best.Site.Probability"]
@@ -321,7 +410,8 @@ def site_quant(precursor_long: pd.DataFrame,
     site_df = (df.drop(columns=["Protein.Group"], errors="ignore")
                  .rename(columns={"__site_keys__": "Protein.Group"}))
     lfq_in = _to_lfq_input(site_df, protein_col="Protein.Group")
-    site_lfq = _run_lfq_on_df(lfq_in, min_samples=min_samples)
+    site_lfq = _run_lfq_on_df(lfq_in, min_samples=min_samples,
+                               num_cores=num_cores, stage="site-legacy")
     if "Best.Site.Probability" in df.columns and not site_lfq.empty:
         loc = (df.groupby("Protein.Group")["Best.Site.Probability"]
                  .mean()
@@ -388,9 +478,17 @@ def precursor_matrix_normalized(precursor_long: pd.DataFrame) -> pd.DataFrame:
         df = lfqutils.remove_allnan_rows_input_df(df)
         if df.empty:
             return pr_wide
+        # v0.5.9.2: surface progress so a stuck pr_matrix step is visible.
+        dask_ver = _detect_dask()
+        logger.info(
+            "[quantify-pr_norm] starting NormalizationManager: %d ions x %d samples, dask=%s",
+            len(df), len(sample_cols), dask_ver or "NOT_INSTALLED",
+        )
+        t0 = time.monotonic()
         df = lfqnorm.NormalizationManagerSamplesOnSelectedProteins(
             df, num_samples_quadratic=50
         ).complete_dataframe
+        logger.info("[quantify-pr_norm] done in %.1fs", time.monotonic() - t0)
         # directLFQ promotes (protein, ion) into a MultiIndex; restore them as
         # ordinary columns so we can merge back on Precursor.Id.
         df_reset = df.reset_index()

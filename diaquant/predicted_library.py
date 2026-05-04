@@ -44,6 +44,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -183,13 +184,18 @@ def _hash_fasta(fasta: Path) -> str:
 _MODEL_VERSION = "peptdeep-generic-1"
 
 
-def _cache_key(cfg: DiaQuantConfig, fix_mods: List[str], var_mods: List[str]) -> str:
-    """Deterministic cache key for one predicted-library run.
+def _digest_key(cfg: DiaQuantConfig, fix_mods: List[str], var_mods: List[str]) -> str:
+    """Cache key for the FASTA-digest + precursor enumeration step only.
 
-    All parameters that change the output library participate in the hash, so
-    two jobs with the same FASTA / species / enzyme / PTM set / instrument /
-    mz-range end up pointing at the same cached TSV regardless of where the
-    job was submitted from.
+    Two jobs that share the same FASTA, enzyme, cleavage rules, charge/mz
+    ranges, peptide lengths and modification set will have the same digest
+    key even if they differ in NCE or instrument preset.  This key identifies
+    the "precursor universe" — the set of peptide sequences and charges that
+    AlphaPeptDeep will be asked to predict.
+
+    Changing ``pred_lib_nce`` or ``pred_lib_instrument`` does NOT change this
+    key, allowing the ``instrument_key`` layer below to detect that only the
+    MS2 prediction (not the digest) needs to be redone.
     """
     payload = {
         "fasta": _hash_fasta(cfg.fasta),
@@ -202,14 +208,45 @@ def _cache_key(cfg: DiaQuantConfig, fix_mods: List[str], var_mods: List[str]) ->
         "min_mz": cfg.min_precursor_mz,
         "max_mz": cfg.max_precursor_mz,
         "max_var": cfg.max_variable_mods,
-        "instrument": cfg.pred_lib_instrument,
-        "nce": cfg.pred_lib_nce,
         "fix_mods": sorted(fix_mods),
         "var_mods": sorted(var_mods),
         "model": _MODEL_VERSION,
     }
     blob = json.dumps(payload, sort_keys=True).encode()
-    return hashlib.sha1(blob).hexdigest()[:16]
+    return hashlib.sha1(blob).hexdigest()[:12]
+
+
+def _cache_key(cfg: DiaQuantConfig, fix_mods: List[str], var_mods: List[str]) -> str:
+    """Deterministic cache key for one fully predicted library (digest + MS2 + RT).
+
+    Extends :func:`_digest_key` with instrument and NCE so that two jobs with
+    different collision-energy / instrument presets produce different libraries
+    while still sharing the same FASTA-digest work.  The full library TSV
+    (which includes MS2 fragment intensities) is identified by this key.
+
+    Cache-key taxonomy
+    ------------------
+    ``_digest_key``   — identifies the precursor universe (sequence × charge
+                        product of the FASTA digest).  Changes when FASTA,
+                        enzyme, mods, charge-range, or peptide-length change.
+    ``_cache_key``    — identifies the full library (precursor + RT + MS2
+                        intensities).  Additionally changes when instrument
+                        preset or NCE change.
+
+    Two jobs that share the same ``_cache_key`` will reuse each other's
+    cached 41 GB library without regenerating it.  Two jobs that share only
+    ``_digest_key`` (different NCE) will need to re-run the MS2 prediction
+    step but could share the digest DataFrame in a future optimisation.
+    """
+    payload = {
+        "digest": _digest_key(cfg, fix_mods, var_mods),
+        "instrument": cfg.pred_lib_instrument,
+        "nce": cfg.pred_lib_nce,
+    }
+    blob = json.dumps(payload, sort_keys=True).encode()
+    # Include 12-char digest prefix so the full key is human-readable in logs.
+    inner = hashlib.sha1(blob).hexdigest()[:8]
+    return f"{_digest_key(cfg, fix_mods, var_mods)}{inner}"
 
 
 def _resolve_cache_paths(
@@ -242,6 +279,7 @@ def _write_cache_meta(path: Path, cfg: DiaQuantConfig,
     """
     meta = {
         "cache_id": cache_id,
+        "digest_key": _digest_key(cfg, fix_mods, var_mods),
         "fasta": str(cfg.fasta),
         "fasta_sha1_12": _hash_fasta(cfg.fasta),
         "enzyme": cfg.enzyme,
@@ -258,6 +296,11 @@ def _write_cache_meta(path: Path, cfg: DiaQuantConfig,
         "fix_mods": sorted(fix_mods),
         "var_mods": sorted(var_mods),
         "model_version": _MODEL_VERSION,
+        "cache_key_note": (
+            "cache_id changes only when digest_key OR instrument/nce change. "
+            "Non-library config params (FDR, output_dir, threads …) do NOT "
+            "affect this key — the same library is safely reused."
+        ),
     }
     try:
         path.with_suffix(".meta.json").write_text(
@@ -569,11 +612,24 @@ def generate_predicted_library(
             # Single-shot path (small libraries, or chunking disabled).
             log.info("[diaquant] %s: predicting all %d precursors in a single pass",
                      pass_label, n_prec)
+            _t0 = time.monotonic()
             lib.predict_all(predict_items=["rt", "ms2"])
             handles.translate_to_tsv(
                 lib, str(out_tsv),
                 multiprocessing=False,
                 batch_size=100_000,
+            )
+            _elapsed = time.monotonic() - _t0
+            log.info(
+                "[progress] %s",
+                json.dumps({
+                    "event": "chunk_done", "pass": pass_label,
+                    "chunk": 1, "total": 1,
+                    "chunk_elapsed_s": round(_elapsed, 1),
+                    "total_elapsed_s": round(_elapsed, 1),
+                    "eta_s": 0.0,
+                    "mem_avail_gb": round(_available_memory_gb() or 0, 2),
+                }),
             )
         else:
             _chunked_predict_and_write(
@@ -679,6 +735,9 @@ def _chunked_predict_and_write(
         log.info("[diaquant] %s: available memory before chunked predict: %.1f GB",
                  pass_label, avail_before)
 
+    _predict_start_wall = time.monotonic()
+    _chunk_elapsed: List[float] = []   # rolling history for ETA
+
     # ModelManager owns the transformer weights and exposes a
     # ``predict_all(precursor_df=...)`` entry point that operates on any
     # chunk of precursors.  Reuse the model_manager attached to full_lib
@@ -723,6 +782,8 @@ def _chunked_predict_and_write(
                 chunk_label, lo, hi, hi - lo,
             )
 
+            _ck_t0 = time.monotonic()
+
             chunk_df = full_precursor_df.iloc[lo:hi].reset_index(
                 drop=True
             ).copy()
@@ -766,15 +827,38 @@ def _chunked_predict_and_write(
                 import torch  # type: ignore
                 if hasattr(torch, "cuda") and torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                # Apple Silicon MPS accelerator
+                if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+                    torch.mps.empty_cache()
             except Exception:
                 pass
 
+            _ck_elapsed = time.monotonic() - _ck_t0
+            _chunk_elapsed.append(_ck_elapsed)
+            _total_elapsed = time.monotonic() - _predict_start_wall
+            # ETA: average time per completed chunk × remaining chunks
+            _avg = sum(_chunk_elapsed) / len(_chunk_elapsed)
+            _remaining = n_chunks - (ck + 1)
+            _eta = _avg * _remaining
             avail_after = _available_memory_gb()
-            if avail_after is not None:
-                log.info(
-                    "[diaquant] %s: chunk %d/%d done -- available memory: %.1f GB",
-                    pass_label, ck + 1, n_chunks, avail_after,
-                )
+            # Structured JSON progress line — parseable by ptm-platform
+            progress = {
+                "event": "chunk_done",
+                "pass": pass_label,
+                "chunk": ck + 1,
+                "total": n_chunks,
+                "chunk_elapsed_s": round(_ck_elapsed, 1),
+                "total_elapsed_s": round(_total_elapsed, 1),
+                "eta_s": round(_eta, 1),
+                "mem_avail_gb": round(avail_after, 2) if avail_after is not None else None,
+            }
+            log.info("[progress] %s", json.dumps(progress))
+            log.info(
+                "[diaquant] %s: chunk %d/%d done in %.0fs "
+                "(ETA %.0fs, mem %.1f GB)",
+                pass_label, ck + 1, n_chunks, _ck_elapsed, _eta,
+                avail_after if avail_after is not None else 0.0,
+            )
 
         # ---- concat chunks into the final TSV ----------------------------
         # Stream-concat: write chunk 1 verbatim, then each subsequent

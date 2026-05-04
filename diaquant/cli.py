@@ -27,7 +27,7 @@ from .config import DiaQuantConfig
 from .enzymes import ENZYME_CATALOG, get_enzyme, list_enzymes
 from .instruments import INSTRUMENT_PRESETS, get_instrument, list_instruments
 from .modifications import DEFAULT_MODIFICATIONS
-from .multipass import run_multipass
+from .multipass import _CP_SAGE, _read_checkpoint, _write_checkpoint, run_multipass
 from .parse_sage import attach_fasta_meta, parse_sage_tsv
 from .ptm_profiles import PASS_PROFILES, list_builtin_passes
 from .quantify import (
@@ -305,11 +305,18 @@ def run(cfg_path: str, resume: bool) -> None:
     else:
         click.echo(f"  mode  : single-pass (vars={cfg.variable_modifications})")
         cached_tsv = cfg.output_dir / "sage" / "results.sage.tsv"
-        if resume and cached_tsv.exists():
-            click.echo(f"  resume: cached Sage results found, skipping search.")
+        sage_cp = _read_checkpoint(cfg.output_dir, _CP_SAGE)
+        sage_cached = (
+            (resume and cached_tsv.exists())
+            or (sage_cp is not None and cached_tsv.exists())
+        )
+        if sage_cached:
+            src = "checkpoint" if sage_cp else "resume flag"
+            click.echo(f"  resume ({src}): cached Sage results found, skipping search.")
             sage_tsv = cached_tsv
         else:
             sage_tsv = run_sage_batched(cfg)
+            _write_checkpoint(cfg.output_dir, _CP_SAGE, sage_tsv=str(sage_tsv))
         # v0.5.5: pull the unfiltered PSM table alongside the filtered one so MBR
         # has a donor pool.  Multipass already handles this internally.
         long_df, long_df_full = parse_sage_tsv(

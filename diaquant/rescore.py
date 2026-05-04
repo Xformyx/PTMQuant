@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -54,7 +54,11 @@ log = logging.getLogger(__name__)
 # Predicted-library parsing
 # ---------------------------------------------------------------------------
 
-def _load_predicted_library(library_tsv: Path) -> pd.DataFrame:
+def _load_predicted_library(
+    library_tsv: Path,
+    needed_keys: Optional[Set[Tuple[str, int]]] = None,
+    chunk_size: int = 500_000,
+) -> pd.DataFrame:
     """Read the AlphaPeptDeep-written TSV and return the minimal join frame.
 
     The TSV is the Spectronaut-compatible layout written by
@@ -62,22 +66,29 @@ def _load_predicted_library(library_tsv: Path) -> pd.DataFrame:
     fragment).  For RT rescoring we only need ``ModifiedPeptide``,
     ``PrecursorCharge`` and ``iRT``/``RT`` per precursor, so we deduplicate.
 
-    The actual column names differ slightly between AlphaBase versions; we
-    therefore look for them case-insensitively and with a small set of
-    aliases.  Returns an empty dataframe with the expected columns if the
-    file is empty or unreadable.
+    When ``needed_keys`` is provided (a set of
+    ``(canonical_mod_key, charge_int)`` tuples built from the PSM table),
+    the library is **streamed in chunks** of ``chunk_size`` rows and only
+    rows matching those keys are kept.  For a 41 GB library with ~26 M rows
+    this reduces peak memory from >40 GB to a few hundred MB when the PSM
+    table has O(100k) unique precursors (typically 1–5 % of the library).
+
+    When ``needed_keys`` is ``None`` the full library is read into RAM (legacy
+    behaviour, appropriate when the library is small or RAM is abundant).
     """
     columns = ["Modified.Sequence", "Precursor.Charge", "Pred.RT"]
     if not library_tsv.exists():
         return pd.DataFrame(columns=columns)
+
+    # --- detect column layout from the header only (zero-copy) ------------
     try:
-        df = pd.read_csv(library_tsv, sep="\t", low_memory=False)
+        header_df = pd.read_csv(library_tsv, sep="\t", nrows=0)
     except Exception as exc:                                         # pragma: no cover
-        log.warning("Could not read predicted library %s (%s)", library_tsv, exc)
+        log.warning("Could not read predicted library header %s (%s)",
+                    library_tsv, exc)
         return pd.DataFrame(columns=columns)
 
-    # normalise column names
-    lc = {c.lower(): c for c in df.columns}
+    lc = {c.lower(): c for c in header_df.columns}
     seq_col = (lc.get("modifiedpeptide") or lc.get("modified.sequence")
                or lc.get("modified_sequence"))
     charge_col = (lc.get("precursorcharge") or lc.get("precursor.charge")
@@ -87,20 +98,90 @@ def _load_predicted_library(library_tsv: Path) -> pd.DataFrame:
     if not (seq_col and charge_col and rt_col):                     # pragma: no cover
         log.warning(
             "Predicted library %s missing required columns "
-            "(have: %s)", library_tsv, list(df.columns)[:8],
+            "(have: %s)", library_tsv, list(header_df.columns)[:8],
         )
         return pd.DataFrame(columns=columns)
 
-    sub = (df[[seq_col, charge_col, rt_col]]
-           .rename(columns={seq_col: "Modified.Sequence",
-                            charge_col: "Precursor.Charge",
-                            rt_col: "Pred.RT"})
-           .drop_duplicates(["Modified.Sequence", "Precursor.Charge"]))
-    # coerce types so pandas merge works
-    sub["Precursor.Charge"] = pd.to_numeric(sub["Precursor.Charge"],
-                                            errors="coerce").astype("Int64")
-    sub["Pred.RT"] = pd.to_numeric(sub["Pred.RT"], errors="coerce")
-    return sub.dropna(subset=["Pred.RT"])
+    use_cols = list({seq_col, charge_col, rt_col})
+
+    def _normalise(chunk: pd.DataFrame) -> pd.DataFrame:
+        sub = (chunk[use_cols]
+               .rename(columns={seq_col: "Modified.Sequence",
+                                 charge_col: "Precursor.Charge",
+                                 rt_col: "Pred.RT"}))
+        sub["Precursor.Charge"] = pd.to_numeric(
+            sub["Precursor.Charge"], errors="coerce"
+        ).astype("Int64")
+        sub["Pred.RT"] = pd.to_numeric(sub["Pred.RT"], errors="coerce")
+        return sub.dropna(subset=["Pred.RT"])
+
+    if needed_keys is None:
+        # Legacy path: load everything (fine for small libraries).
+        try:
+            df = pd.read_csv(library_tsv, sep="\t",
+                             usecols=use_cols, low_memory=False)
+        except Exception as exc:                                     # pragma: no cover
+            log.warning("Could not read predicted library %s (%s)",
+                        library_tsv, exc)
+            return pd.DataFrame(columns=columns)
+        sub = _normalise(df)
+        return sub.drop_duplicates(["Modified.Sequence", "Precursor.Charge"])
+
+    # --- streaming path: only keep rows matching needed_keys --------------
+    # needed_keys is a set of (canonical_mod_key(seq), charge_int).
+    log.info(
+        "[diaquant] rescore: streaming library (chunksize=%d, needed=%d keys)",
+        chunk_size, len(needed_keys),
+    )
+    matched: list = []
+    n_rows_read = 0
+    try:
+        reader = pd.read_csv(
+            library_tsv, sep="\t",
+            usecols=use_cols, low_memory=False,
+            chunksize=chunk_size,
+        )
+        for chunk in reader:
+            n_rows_read += len(chunk)
+            sub = _normalise(chunk)
+            if sub.empty:
+                continue
+            # Drop rows with null charge before computing the filter key;
+            # null charges can't match anything in needed_keys.
+            sub = sub.dropna(subset=["Precursor.Charge"])
+            if sub.empty:
+                continue
+            # Vectorised canonical-key computation + set-membership filter.
+            # _canonical_mod_key normalises bracket notation so that
+            # AlphaPeptDeep "AAAS[Phospho]PEPR" and Sage "AAAS[+79.97]PEPR"
+            # both produce the same lookup key.
+            can_keys = sub["Modified.Sequence"].apply(_canonical_mod_key)
+            charges  = sub["Precursor.Charge"].astype(int)
+            mask = [
+                (ck, ch) in needed_keys
+                for ck, ch in zip(can_keys, charges)
+            ]
+            matched.append(sub.iloc[[i for i, m in enumerate(mask) if m]])
+    except Exception as exc:                                         # pragma: no cover
+        log.warning("Streaming read of predicted library failed (%s); "
+                    "falling back to full load.", exc)
+        try:
+            df = pd.read_csv(library_tsv, sep="\t",
+                             usecols=use_cols, low_memory=False)
+            matched = [_normalise(df)]
+        except Exception as exc2:
+            log.warning("Full fallback also failed (%s)", exc2)
+            return pd.DataFrame(columns=columns)
+
+    log.info(
+        "[diaquant] rescore: scanned %d library rows, matched %d precursor rows",
+        n_rows_read,
+        sum(len(m) for m in matched),
+    )
+    if not matched:
+        return pd.DataFrame(columns=columns)
+    combined = pd.concat(matched, ignore_index=True)
+    return combined.drop_duplicates(["Modified.Sequence", "Precursor.Charge"])
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +290,23 @@ def rescore_with_predicted_library(
         log.info("[diaquant] rescore skipped: no predicted library available.")
         return psm_df
 
-    lib_df = _load_predicted_library(Path(library_tsv))
+    # Build the set of canonical (mod_seq, charge) keys we actually need so
+    # _load_predicted_library can stream the library and skip non-matching rows.
+    # This reduces peak memory from O(library_size) to O(matched_psms) — a
+    # 10–20× saving when the library is large (e.g. 41 GB mouse+phospho).
+    needed_keys: Set[Tuple[str, int]] = set()
+    if "Modified.Sequence" in psm_df.columns and "Precursor.Charge" in psm_df.columns:
+        for seq, chg in zip(
+            psm_df["Modified.Sequence"].astype(str),
+            pd.to_numeric(psm_df["Precursor.Charge"], errors="coerce"),
+        ):
+            if pd.notna(chg):
+                needed_keys.add((_canonical_mod_key(seq), int(chg)))
+
+    lib_df = _load_predicted_library(
+        Path(library_tsv),
+        needed_keys=needed_keys if needed_keys else None,
+    )
     if lib_df.empty:
         log.info("[diaquant] rescore skipped: predicted library is empty.")
         return psm_df

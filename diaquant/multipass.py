@@ -21,9 +21,11 @@ own optimally-localised site quantification.
 from __future__ import annotations
 
 import copy
+import json
+import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -33,6 +35,48 @@ from .predicted_library import fine_tune_models, generate_predicted_library
 from .ptm_profiles import PassProfile, resolve_passes
 from .rescore import rescore_with_predicted_library
 from .sage_runner import run_sage, run_sage_batched
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint helpers (Problem 8: resume past completed steps)
+# ---------------------------------------------------------------------------
+
+_CP_LIBRARY = "checkpoint_library_done.json"
+_CP_SAGE    = "checkpoint_sage_done.json"
+
+
+def _write_checkpoint(pass_dir: Path, name: str, **meta) -> None:
+    """Write a JSON checkpoint file marking a step as done."""
+    path = pass_dir / name
+    try:
+        path.write_text(
+            json.dumps({"done": True, "ts": time.time(), **meta}, indent=2)
+        )
+    except Exception:   # non-fatal: worst case we redo the step
+        pass
+
+
+def _read_checkpoint(pass_dir: Path, name: str) -> Optional[dict]:
+    """Return the checkpoint dict if it exists and is valid, else None."""
+    path = pass_dir / name
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+        if data.get("done"):
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def _invalidate_checkpoint(pass_dir: Path, name: str) -> None:
+    """Remove a checkpoint file (e.g. when its inputs are stale)."""
+    path = pass_dir / name
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _config_for_pass(base: DiaQuantConfig, profile: PassProfile) -> DiaQuantConfig:
@@ -122,32 +166,61 @@ def run_multipass(base: DiaQuantConfig, resume: bool = False) -> Tuple[pd.DataFr
         # simply means we fall back to the 0.4.x behaviour (no rescoring).
         library_tsv = None
         if pass_cfg.predicted_library:
-            try:
-                library_tsv = generate_predicted_library(
-                    pass_cfg,
-                    out_dir=pass_cfg.output_dir,
-                    pass_label=profile.name,
-                )
-            except Exception as exc:                                # pragma: no cover
-                if pass_cfg.pred_lib_fallback_in_silico:
-                    print(f"[diaquant]    predicted library failed ({exc}); "
-                          f"falling back to Sage built-in.")
-                    library_tsv = None
+            # Check library checkpoint first (Problem 8).
+            lib_cp = _read_checkpoint(pass_cfg.output_dir, _CP_LIBRARY)
+            if lib_cp is not None and lib_cp.get("library_tsv"):
+                _lib_path = Path(lib_cp["library_tsv"])
+                if _lib_path.exists():
+                    print(f"[diaquant] -> pass '{profile.name}': "
+                          f"checkpoint: library already done ({_lib_path.name}), skipping.")
+                    library_tsv = _lib_path
                 else:
-                    raise
+                    # Checkpoint stale (file deleted); invalidate and regenerate.
+                    _invalidate_checkpoint(pass_cfg.output_dir, _CP_LIBRARY)
+                    lib_cp = None
+
+            if library_tsv is None:
+                try:
+                    library_tsv = generate_predicted_library(
+                        pass_cfg,
+                        out_dir=pass_cfg.output_dir,
+                        pass_label=profile.name,
+                    )
+                    if library_tsv is not None:
+                        _write_checkpoint(
+                            pass_cfg.output_dir, _CP_LIBRARY,
+                            library_tsv=str(library_tsv),
+                        )
+                except Exception as exc:                            # pragma: no cover
+                    if pass_cfg.pred_lib_fallback_in_silico:
+                        print(f"[diaquant]    predicted library failed ({exc}); "
+                              f"falling back to Sage built-in.")
+                        library_tsv = None
+                    else:
+                        raise
             if library_tsv is not None:
                 library_paths.append(Path(library_tsv))
 
         # Resume mode: reuse existing Sage results if present; otherwise
-        # run the (auto-batched) Sage search so both the 0.4.x resume
-        # feature and the 0.5.0 predicted-library feature stay compatible.
+        # run the (auto-batched) Sage search.
+        # Checkpoint precedence: explicit --resume flag OR sage_done checkpoint.
         cached_tsv = pass_cfg.output_dir / "sage" / "results.sage.tsv"
-        if resume and cached_tsv.exists():
+        sage_cp = _read_checkpoint(pass_cfg.output_dir, _CP_SAGE)
+        sage_cached = (
+            (resume and cached_tsv.exists())
+            or (sage_cp is not None and cached_tsv.exists())
+        )
+        if sage_cached:
             print(f"[diaquant] -> pass '{profile.name}': "
-                  f"cached results found ({cached_tsv}), skipping Sage search.")
+                  f"{'checkpoint' if sage_cp else 'cached'} Sage results found "
+                  f"({cached_tsv}), skipping Sage search.")
             sage_tsv = cached_tsv
         else:
             sage_tsv = run_sage_batched(pass_cfg)
+            _write_checkpoint(
+                pass_cfg.output_dir, _CP_SAGE,
+                sage_tsv=str(sage_tsv),
+            )
 
         df, df_full = parse_sage_tsv(sage_tsv,
                                      site_cutoff=pass_cfg.site_probability_cutoff,

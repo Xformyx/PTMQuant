@@ -73,20 +73,40 @@ log = logging.getLogger(__name__)
 _out_dir: Optional[Path] = None
 _start_time: float = 0.0
 _metrics_path: Optional[Path] = None
+_run_id: Optional[str] = None      # e.g. "20260504_185500"
 
 
 def set_metrics_dir(out_dir: Path) -> None:
     """Configure the output directory and reset the elapsed-time origin.
 
-    Call this **once** at the very start of each pipeline run (before any
-    ``record_event`` call).  Subsequent calls overwrite the previous file
-    path and reset the elapsed timer.
+    Each call generates a new ``run_id`` (UTC timestamp to the second) and
+    opens a **new** file ``run_metrics_<run_id>.jsonl`` so that re-runs of
+    the same job produce separate, independently comparable files rather than
+    appending to a single file.
+
+    A convenience symlink ``run_metrics_latest.jsonl`` is updated to point at
+    the newest file so callers that always want the current run can use a
+    stable path.
     """
-    global _out_dir, _start_time, _metrics_path
+    global _out_dir, _start_time, _metrics_path, _run_id
     _out_dir = Path(out_dir)
     _out_dir.mkdir(parents=True, exist_ok=True)
     _start_time = time.monotonic()
-    _metrics_path = _out_dir / "run_metrics.jsonl"
+
+    # Unique run_id based on wall-clock time (UTC, second precision).
+    import datetime
+    _run_id = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    _metrics_path = _out_dir / f"run_metrics_{_run_id}.jsonl"
+
+    # Update the "latest" symlink so ptm-platform can always read
+    # run_metrics_latest.jsonl without knowing the run_id.
+    latest = _out_dir / "run_metrics_latest.jsonl"
+    try:
+        if latest.is_symlink() or latest.exists():
+            latest.unlink()
+        latest.symlink_to(_metrics_path.name)
+    except Exception:
+        pass  # symlinks may not be supported on all platforms (e.g. Windows)
 
 
 def _resource_snapshot() -> dict:
@@ -144,6 +164,7 @@ def record_event(stage: str, event: str, **extra: Any) -> None:
     elapsed = time.monotonic() - _start_time if _start_time else 0.0
 
     row: dict = {
+        "run_id":    _run_id,
         "ts":        round(now, 3),
         "iso":       _iso(now),
         "elapsed_s": round(elapsed, 1),

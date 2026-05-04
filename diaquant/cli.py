@@ -27,6 +27,7 @@ from .config import DiaQuantConfig
 from .enzymes import ENZYME_CATALOG, get_enzyme, list_enzymes
 from .instruments import INSTRUMENT_PRESETS, get_instrument, list_instruments
 from .modifications import DEFAULT_MODIFICATIONS
+from .metrics import flush_metrics, record_event, set_metrics_dir
 from .multipass import _CP_SAGE, _read_checkpoint, _write_checkpoint, run_multipass
 from .parse_sage import attach_fasta_meta, parse_sage_tsv
 from .ptm_profiles import PASS_PROFILES, list_builtin_passes
@@ -282,6 +283,13 @@ def list_passes() -> None:
 def run(cfg_path: str, resume: bool) -> None:
     """Execute the full Sage → directLFQ → DIA-NN-style export pipeline."""
     cfg = DiaQuantConfig.from_yaml(cfg_path)
+    # Initialise metrics logger — must be called before any record_event()
+    set_metrics_dir(cfg.output_dir)
+    record_event("pipeline", "start",
+                 version=__version__,
+                 n_mzml=len(cfg.mzml_files),
+                 fasta=str(cfg.fasta),
+                 passes=cfg.passes + [p["name"] for p in cfg.custom_passes])
     click.secho(f"[diaquant {__version__}] starting", fg="green")
     click.echo(f"  fasta : {cfg.fasta}")
     click.echo(f"  mzml  : {len(cfg.mzml_files)} files")
@@ -386,6 +394,7 @@ def run(cfg_path: str, resume: bool) -> None:
 
     # ----- LOWESS run-to-run RT alignment (always-on) -----
     if cfg.rt_alignment:
+        record_event("rt_align", "start", n_psms=len(long_df))
         click.echo(f"[diaquant] RT alignment (LOWESS frac={cfg.rt_align_frac})")
         long_df, rt_stats = align_runs(
             long_df,
@@ -402,6 +411,7 @@ def run(cfg_path: str, resume: bool) -> None:
         )
         rt_stats_path = cfg.output_dir / "report.rt_alignment.tsv"
         write_rt_stats(rt_stats, rt_stats_path)
+        record_event("rt_align", "end", n_psms=len(long_df))
         click.echo(f"  wrote {rt_stats_path}")
         # short summary on the console
         if not rt_stats.empty:
@@ -419,6 +429,7 @@ def run(cfg_path: str, resume: bool) -> None:
     mbr_on = getattr(cfg, "mbr_rescue", getattr(cfg,
                                                  "match_between_runs", True))
     if mbr_on and "psm_full" in long_df.attrs:
+        record_event("mbr", "start", n_psms=len(long_df))
         click.echo("[diaquant] match-between-runs (cross-run rescue)")
         psm_full = long_df.attrs.pop("psm_full")
         # Propagate RT.Aligned from the confident table onto the full pool
@@ -466,6 +477,7 @@ def run(cfg_path: str, resume: bool) -> None:
         mbr_path = cfg.output_dir / "report.mbr.tsv"
         mbr_stats.to_csv(mbr_path, sep="\t", index=False, na_rep="")
         n_rescued = int(mbr_stats["n_rescued"].sum()) if not mbr_stats.empty else 0
+        record_event("mbr", "end", n_psms=len(long_df), n_rescued=n_rescued)
         click.echo(f"  wrote {mbr_path} (rescued {n_rescued} precursor-run pairs)")
     else:
         click.echo("[diaquant] MBR disabled")
@@ -521,6 +533,7 @@ def run(cfg_path: str, resume: bool) -> None:
     # site quant steps actually parallelise.  Without this v0.5.9.1 jobs
     # spent 15+ hours stuck at 95% on a single thread.  See quantify._run_lfq_on_df.
     _quant_cores = getattr(cfg, "quant_num_cores", None)
+    record_event("quant", "start", n_psms=len(long_df))
     click.echo(f"[diaquant] quantification: directLFQ with cores={_quant_cores or 'auto'}")
     pg_lfq = protein_quant(long_df, min_samples=cfg.quant_min_samples,
                            num_cores=_quant_cores)
@@ -560,6 +573,7 @@ def run(cfg_path: str, resume: bool) -> None:
         # Same for site_lfq.)  We hand the writer the un-imputed frames and
         # post-process the on-disk TSVs in-place below.
 
+    record_event("quant", "end")
     write_pr_matrix(pr_wide, out / "report.pr_matrix.tsv")
     write_pg_matrix(pg_lfq, pr_wide, out / "report.pg_matrix.tsv")
     write_site_matrix(site_lfq, out / "report.ptm_site_matrix.tsv")
@@ -674,7 +688,11 @@ def run(cfg_path: str, resume: bool) -> None:
         except Exception as exc2:
             click.secho(f"  stub manifest also failed: {exc2}", fg="red")
 
+    metrics_path = flush_metrics()
+    record_event("pipeline", "end")
     click.secho("[diaquant] done.", fg="green")
+    if metrics_path:
+        click.echo(f"  wrote {metrics_path}")
     click.echo(f"  wrote {out/'report.pr_matrix.tsv'}")
     click.echo(f"  wrote {out/'report.pg_matrix.tsv'}")
     click.echo(f"  wrote {out/'report.ptm_site_matrix.tsv'}")

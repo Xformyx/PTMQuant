@@ -30,6 +30,7 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
 from .config import DiaQuantConfig
+from .metrics import record_event
 from .parse_sage import attach_fasta_meta, parse_sage_tsv
 from .predicted_library import fine_tune_models, generate_predicted_library
 from .ptm_profiles import PassProfile, resolve_passes
@@ -214,9 +215,13 @@ def run_multipass(base: DiaQuantConfig, resume: bool = False) -> Tuple[pd.DataFr
             print(f"[diaquant] -> pass '{profile.name}': "
                   f"{'checkpoint' if sage_cp else 'cached'} Sage results found "
                   f"({cached_tsv}), skipping Sage search.")
+            record_event("sage", "checkpoint_hit", pass_name=profile.name)
             sage_tsv = cached_tsv
         else:
+            record_event("sage", "start", pass_name=profile.name)
             sage_tsv = run_sage_batched(pass_cfg)
+            record_event("sage", "end", pass_name=profile.name,
+                         sage_tsv=str(sage_tsv))
             _write_checkpoint(
                 pass_cfg.output_dir, _CP_SAGE,
                 sage_tsv=str(sage_tsv),

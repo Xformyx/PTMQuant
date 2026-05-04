@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
 from .config import DiaQuantConfig
+from .metrics import record_event
 from .modifications import DEFAULT_MODIFICATIONS, Modification, resolve_modifications
 
 log = logging.getLogger(__name__)
@@ -487,6 +488,8 @@ def generate_predicted_library(
         if shared_tsv is not None and shared_tsv.exists():
             log.info("[diaquant] %s: reusing SHARED predicted library %s",
                      pass_label, shared_tsv)
+            record_event("library", "cache_hit", pass_name=pass_label,
+                         cache_type="shared", path=str(shared_tsv))
             if not local_tsv.exists():
                 try:
                     local_tsv.symlink_to(shared_tsv)
@@ -497,6 +500,8 @@ def generate_predicted_library(
         if local_tsv.exists():
             log.info("[diaquant] %s: reusing local predicted library %s",
                      pass_label, local_tsv.name)
+            record_event("library", "cache_hit", pass_name=pass_label,
+                         cache_type="local", path=str(local_tsv))
             # Promote hit into shared cache so the next job benefits.
             if shared_tsv is not None:
                 try:
@@ -528,11 +533,7 @@ def generate_predicted_library(
         )
 
     # ---- v0.5.9.1: pre-flight memory budget check (HARD-FAIL) -------------
-    # Refuse to start prediction when the host clearly cannot even fit one
-    # chunk of the transformer working set.  In v0.5.9.1 fallback is
-    # disabled at user request: an OOM-class condition raises so the
-    # operator must consciously bump Docker Desktop memory or lower the
-    # chunk_size, instead of silently producing a degraded library.
+    record_event("library", "start", pass_name=pass_label)
     global _LAST_MEM_AVAILABLE_GB, _LAST_PRECURSOR_COUNT
     avail_gb = _available_memory_gb()
     _LAST_MEM_AVAILABLE_GB = avail_gb
@@ -580,6 +581,10 @@ def generate_predicted_library(
             int(cfg.pred_lib_batch_size),
             int(cfg.pred_lib_chunk_size),
             f"{avail_gb:.1f}" if avail_gb is not None else "unknown",
+        )
+        record_event(
+            "library", "digest_done", pass_name=pass_label,
+            n_precursors=n_prec, n_peptides=int(len(lib.peptide_df)),
         )
         # ---- v0.5.9.1: precursor-count cap (HARD-FAIL) ---------------------
         # Hard upper bound regardless of chunking.  Even with chunked
@@ -644,6 +649,8 @@ def generate_predicted_library(
             )
         log.info("[diaquant] %s: predicted library written to %s",
                  pass_label, out_tsv)
+        record_event("library", "end", pass_name=pass_label,
+                     library_tsv=str(out_tsv))
         # Populate shared cache on first computation so the next job of any
         # other user on the same platform instance can reuse this library.
         if cfg.pred_lib_cache and shared_tsv is not None:
@@ -858,6 +865,12 @@ def _chunked_predict_and_write(
                 "(ETA %.0fs, mem %.1f GB)",
                 pass_label, ck + 1, n_chunks, _ck_elapsed, _eta,
                 avail_after if avail_after is not None else 0.0,
+            )
+            record_event(
+                "library", "chunk_done", pass_name=pass_label,
+                chunk=ck + 1, total=n_chunks,
+                chunk_elapsed_s=round(_ck_elapsed, 1),
+                eta_s=round(_eta, 1),
             )
 
         # ---- concat chunks into the final TSV ----------------------------

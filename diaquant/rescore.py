@@ -46,6 +46,7 @@ import numpy as np
 import pandas as pd
 
 from .config import DiaQuantConfig
+from .metrics import record_event
 
 log = logging.getLogger(__name__)
 
@@ -303,6 +304,8 @@ def rescore_with_predicted_library(
             if pd.notna(chg):
                 needed_keys.add((_canonical_mod_key(seq), int(chg)))
 
+    record_event("rescore", "start", n_psms=len(psm_df),
+                 n_needed_keys=len(needed_keys))
     lib_df = _load_predicted_library(
         Path(library_tsv),
         needed_keys=needed_keys if needed_keys else None,
@@ -356,6 +359,8 @@ def rescore_with_predicted_library(
             merged.loc[outliers, "Score"] = merged.loc[outliers, "Score"] * 0.5
 
     merged = merged.drop(columns=["_join_seq"])
+    record_event("rescore", "end", n_psms_out=len(merged),
+                 n_matched=int(n_hit))
 
     # ----- optional fragment cosine (disabled by default) --------------
     cutoff = float(cfg.rescore_frag_cosine_cutoff or 0.0)

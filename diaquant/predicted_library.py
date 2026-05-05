@@ -696,6 +696,43 @@ def generate_predicted_library(
             )
         log.info("[diaquant] %s: predicted library written to %s",
                  pass_label, out_tsv)
+
+        # ---- Aggressive memory release BEFORE recording end event ----------
+        # After chunked prediction the Python process RSS is typically 50+ GB
+        # (AlphaPeptDeep model + precursor_df + accumulated results).  When
+        # the caller then spawns Sage via subprocess.run(), Linux fork() briefly
+        # doubles the virtual address space and triggers the OOM killer.
+        # Explicitly delete the heavy objects and force GC here so fork() has
+        # plenty of room.
+        _rss_before = None
+        try:
+            import gc as _gc
+            import psutil as _psutil
+            _proc = _psutil.Process()
+            _rss_before = _proc.memory_info().rss / 1e9
+            del lib
+        except Exception:
+            pass
+        _gc.collect()
+        _gc.collect()
+        try:
+            import torch as _torch
+            if hasattr(_torch, "mps") and hasattr(_torch.mps, "empty_cache"):
+                _torch.mps.empty_cache()
+            if _torch.cuda.is_available():
+                _torch.cuda.empty_cache()
+        except Exception:
+            pass
+        _gc.collect()
+        try:
+            _rss_after = _psutil.Process().memory_info().rss / 1e9
+            log.info(
+                "[diaquant] %s: post-library GC: RSS %.1f → %.1f GB",
+                pass_label, _rss_before or 0, _rss_after,
+            )
+        except Exception:
+            pass
+
         record_event("library", "end", pass_name=pass_label,
                      library_tsv=str(out_tsv))
         # Populate shared cache on first computation so the next job of any

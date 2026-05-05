@@ -457,7 +457,7 @@ def run(cfg_path: str, resume: bool) -> None:
         predicted_donors = _load_predicted_donor_table(
             long_df.attrs.get("predicted_library_paths", []),
         )
-        inject = bool(getattr(cfg, "mbr_inject_predicted_donors", True))
+        inject = bool(getattr(cfg, "mbr_inject_predicted_donors", False))
         merged, mbr_stats = match_between_runs(
             psm_full,
             long_df,

@@ -277,6 +277,9 @@ def _per_run_stats(confident: pd.DataFrame,
 # v0.5.8: predicted-library donor injection
 # ---------------------------------------------------------------------------
 
+_MAX_INJECTED_DONORS = 200_000   # hard cap to prevent merge memory explosion
+
+
 def _injected_donor_table(predicted: pd.DataFrame,
                           psm_full: pd.DataFrame,
                           confident_donors: pd.DataFrame,
@@ -325,6 +328,15 @@ def _injected_donor_table(predicted: pd.DataFrame,
         "donor_n_runs": [int(runs_per_key.loc[k]) for k in p["_pkey"]],
         "is_injected": True,
     })
+
+    # Hard cap: prevent memory explosion when the predicted library is large
+    # (e.g. full proteome 26 M precursors). Keep the most-observed donors.
+    if len(out) > _MAX_INJECTED_DONORS:
+        out = out.nlargest(_MAX_INJECTED_DONORS, "donor_n_runs",
+                           keep="first").reset_index(drop=True)
+        logger.info("MBR: injected donor pool capped at %d (was %d)",
+                    _MAX_INJECTED_DONORS, len(out) + _MAX_INJECTED_DONORS)
+
     return out
 
 

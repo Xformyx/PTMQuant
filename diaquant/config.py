@@ -256,8 +256,12 @@ class DiaQuantConfig:
     # observed (any q-value) in >= ``mbr_min_injected_observed_runs`` runs
     # before its sub-threshold PSMs are promoted, so target-decoy FDR is
     # preserved (no PSM is invented).
-    mbr_inject_predicted_donors: bool = True
-    mbr_min_injected_observed_runs: int = 1
+    # v0.5.10: disabled by default — injecting the full 26 M-precursor
+    # AlphaPeptDeep library as MBR donors causes multi-GB memory spikes on
+    # the merge step.  Enable only when the predicted library is small
+    # (e.g. after pre-search filtering) or when you have >192 GB RAM.
+    mbr_inject_predicted_donors: bool = False
+    mbr_min_injected_observed_runs: int = 2  # stricter default
     mbr_injected_rt_tol_min: float = 1.5
 
     # ---- v0.5.9.1: AlphaPeptDeep memory safety ----

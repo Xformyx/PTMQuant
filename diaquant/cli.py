@@ -441,6 +441,10 @@ def run(cfg_path: str, resume: bool) -> None:
         record_event("mbr", "start", n_psms=len(long_df))
         click.echo("[diaquant] match-between-runs (cross-run rescue)")
         psm_full = long_df.attrs.pop("psm_full")
+        import gc as _gc_mbr
+        _gc_mbr.collect()  # free any rescore intermediates before the big merge
+        record_event("mbr", "psm_full_loaded",
+                     n_psm_full=len(psm_full), n_cols=len(psm_full.columns))
         # Propagate RT.Aligned from the confident table onto the full pool
         # (they share Modified.Sequence + Precursor.Charge + filename).
         if "RT.Aligned" in long_df.columns:
@@ -450,14 +454,19 @@ def run(cfg_path: str, resume: bool) -> None:
             psm_full = psm_full.merge(rt_map, on=["Modified.Sequence",
                                                    "Precursor.Charge",
                                                    "filename"], how="left")
-        # v0.5.8: load predicted-library precursors as MBR donors so
-        # phospho/PTM precursors absent from any confident-PSM run get a
-        # chance to be rescued. Predicted donors only promote rows that Sage
-        # already scored (target-decoy FDR preserved).
-        predicted_donors = _load_predicted_donor_table(
-            long_df.attrs.get("predicted_library_paths", []),
-        )
+        record_event("mbr", "rt_aligned_merged")
+        # v0.5.8: load predicted-library precursors as MBR donors.
+        # Only load when injection is actually enabled — avoids reading the
+        # 41 GB library file when mbr_inject_predicted_donors=False (default).
         inject = bool(getattr(cfg, "mbr_inject_predicted_donors", False))
+        predicted_donors = None
+        if inject:
+            predicted_donors = _load_predicted_donor_table(
+                long_df.attrs.get("predicted_library_paths", []),
+            )
+        record_event("mbr", "match_start",
+                     inject=inject,
+                     n_predicted=len(predicted_donors) if predicted_donors is not None else 0)
         merged, mbr_stats = match_between_runs(
             psm_full,
             long_df,

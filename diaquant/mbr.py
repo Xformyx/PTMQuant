@@ -164,13 +164,17 @@ def match_between_runs(psm_full: pd.DataFrame,
     confident["MBR"] = False
     confident["Q.Value.MBR"] = np.nan
 
-    # all PSMs below q_rescue that are NOT already confident
-    full = psm_full.copy()
-    full["_pkey"] = _pkey(full)
+    # Filter psm_full to donor-matching rows BEFORE copying to avoid
+    # duplicating the full 681k-row table (saves 1-2 GB peak memory on
+    # Docker Desktop VMs with limited RAM).
     donor_keys = set(donors["_pkey"])
-    full = full[full["_pkey"].isin(donor_keys)]
-    if "Q.Value" in full.columns:
-        full = full[full["Q.Value"] <= params.q_rescue]
+    _all_pkeys = _pkey(psm_full)
+    _mask = _all_pkeys.isin(donor_keys)
+    if "Q.Value" in psm_full.columns:
+        _mask &= psm_full["Q.Value"] <= params.q_rescue
+    full = psm_full.loc[_mask].copy()
+    full["_pkey"] = _all_pkeys.loc[_mask].values
+    del _all_pkeys, _mask
 
     # exclude PSMs that are already in the confident set
     conf_key = (_pkey(confident) + "@" + confident["filename"].astype(str)).tolist()

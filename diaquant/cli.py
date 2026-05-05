@@ -69,28 +69,37 @@ def _load_predicted_donor_table(library_paths) -> "pd.DataFrame | None":
     """
     if not library_paths:
         return None
+    # Column synonyms accepted from AlphaPeptDeep / Spectronaut / DIA-NN exports.
+    _SEQ_SYNS = ("Modified.Sequence", "ModifiedPeptide",
+                 "modified_sequence", "ModifiedSequence")
+    _CHG_SYNS = ("Precursor.Charge", "PrecursorCharge",
+                 "precursor_charge", "Charge")
+    _RT_SYNS  = ("Pred.RT", "iRT", "RT", "rt_pred",
+                 "PredictedRT", "NormalizedRetentionTime")
+
     frames = []
     for path in library_paths:
         p = Path(path)
         if not p.exists():
             continue
         try:
-            df = pd.read_csv(p, sep="\t", low_memory=False)
+            # Peek at column names only (read 0 rows) so we can build usecols.
+            header_df = pd.read_csv(p, sep="\t", nrows=0)
+            cols = set(header_df.columns)
+            seq_col = next((c for c in _SEQ_SYNS if c in cols), None)
+            chg_col = next((c for c in _CHG_SYNS if c in cols), None)
+            rt_col  = next((c for c in _RT_SYNS  if c in cols), None)
+            if not (seq_col and chg_col and rt_col):
+                continue
+            # Read only the 3 needed columns — avoids loading the full 41 GB
+            # fragment-ion library into memory (would OOM on most hosts).
+            df = pd.read_csv(
+                p, sep="\t", usecols=[seq_col, chg_col, rt_col],
+                low_memory=False,
+            )
         except Exception as exc:                              # pragma: no cover
             click.echo(f"[diaquant] WARNING: could not read predicted lib "
                        f"{p}: {exc}")
-            continue
-        # Map column synonyms.
-        seq_col = next((c for c in ("Modified.Sequence", "ModifiedPeptide",
-                                    "modified_sequence", "ModifiedSequence")
-                        if c in df.columns), None)
-        chg_col = next((c for c in ("Precursor.Charge", "PrecursorCharge",
-                                    "precursor_charge", "Charge")
-                        if c in df.columns), None)
-        rt_col  = next((c for c in ("Pred.RT", "iRT", "RT", "rt_pred",
-                                    "PredictedRT", "NormalizedRetentionTime")
-                        if c in df.columns), None)
-        if not (seq_col and chg_col and rt_col):
             continue
         sub = df[[seq_col, chg_col, rt_col]].copy()
         sub.columns = ["Modified.Sequence", "Precursor.Charge", "Pred.RT"]

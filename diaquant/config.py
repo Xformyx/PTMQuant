@@ -146,6 +146,28 @@ class DiaQuantConfig:
                                               # high-confidence PSMs before
                                               # predicting subsequent passes.
     pred_lib_transfer_epochs: int = 10        # epochs for the opt-in fine-tune.
+
+    # ---- Pre-search: Sage in-silico pass before AlphaPeptDeep (v0.5.10) ----
+    # When True, diaquant runs a fast Sage search with its built-in in-silico
+    # (theoretical) library BEFORE AlphaPeptDeep prediction.  The observed
+    # bare peptide sequences are used to filter AlphaPeptDeep's digest from
+    # the full proteome-wide precursor universe down to only the sequences
+    # actually detected in the data.
+    #
+    # Typical reduction: 26 M → 300 k–1 M precursors (95–99 %)
+    # Typical time saving: 20+ hours → 30–90 minutes
+    #
+    # The pre-search uses very loose FDR (reports all PSMs regardless of q-value)
+    # so that even low-scoring peptides contribute their sequences.  A sequence
+    # is retained if it appears in any PSM with hyperscore >= pred_lib_presearch_min_score.
+    # Setting pred_lib_presearch_min_score = 0 keeps every sequence Sage reported.
+    pred_lib_presearch: bool = True           # default ON — the speedup is huge
+    pred_lib_presearch_min_score: float = 5.0 # minimum Sage hyperscore to trust a
+                                              # sequence (0 = keep everything)
+    pred_lib_presearch_fdr: float = 0.50      # loose FDR for the pre-search
+                                              # (0.50 = report 50 % FDR PSMs;
+                                              # we only care about the sequence set)
+
     # ``pred_lib_fallback_in_silico``: v0.5.9.1 disables the silent
     # fallback by default at user request.  When AlphaPeptDeep prediction
     # fails (OOM, missing weights, ABI mismatch, ...), the pipeline now

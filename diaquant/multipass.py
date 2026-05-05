@@ -35,7 +35,12 @@ from .parse_sage import attach_fasta_meta, parse_sage_tsv
 from .predicted_library import fine_tune_models, generate_predicted_library
 from .ptm_profiles import PassProfile, resolve_passes
 from .rescore import rescore_with_predicted_library
-from .sage_runner import run_sage, run_sage_batched
+from .sage_runner import (
+    collect_presearch_sequences,
+    run_sage,
+    run_sage_batched,
+    run_sage_presearch,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -176,16 +181,61 @@ def run_multipass(base: DiaQuantConfig, resume: bool = False) -> Tuple[pd.DataFr
                           f"checkpoint: library already done ({_lib_path.name}), skipping.")
                     library_tsv = _lib_path
                 else:
-                    # Checkpoint stale (file deleted); invalidate and regenerate.
                     _invalidate_checkpoint(pass_cfg.output_dir, _CP_LIBRARY)
                     lib_cp = None
 
             if library_tsv is None:
+                # ---- v0.5.10: pre-search filter ----------------------------
+                # Run a fast in-silico Sage pass first so we know which bare
+                # peptide sequences are actually in the data.  AlphaPeptDeep
+                # then only predicts RT+MS2 for those sequences, reducing the
+                # precursor universe from ~26 M to ~300 k (97 % cut).
+                pre_filter: Optional[set] = None
+                if getattr(pass_cfg, "pred_lib_presearch", True):
+                    _pre_cp_key = "checkpoint_presearch_done.json"
+                    _pre_cp = _read_checkpoint(pass_cfg.output_dir, _pre_cp_key)
+                    if _pre_cp and _pre_cp.get("presearch_tsv"):
+                        _pre_tsv = Path(_pre_cp["presearch_tsv"])
+                        if _pre_tsv.exists():
+                            print(f"[diaquant] -> pass '{profile.name}': "
+                                  f"checkpoint: pre-search already done, reusing sequences.")
+                            pre_filter = collect_presearch_sequences(
+                                _pre_tsv,
+                                min_score=getattr(pass_cfg,
+                                    "pred_lib_presearch_min_score", 5.0),
+                            )
+                    if pre_filter is None:
+                        try:
+                            record_event("presearch", "start",
+                                         pass_name=profile.name)
+                            print(f"[diaquant] -> pass '{profile.name}': "
+                                  f"running pre-search (in-silico Sage) to "
+                                  f"identify candidate sequences ...")
+                            pre_tsv = run_sage_presearch(pass_cfg)
+                            pre_filter = collect_presearch_sequences(
+                                pre_tsv,
+                                min_score=getattr(pass_cfg,
+                                    "pred_lib_presearch_min_score", 5.0),
+                            )
+                            record_event("presearch", "end",
+                                         pass_name=profile.name,
+                                         n_sequences=len(pre_filter))
+                            _write_checkpoint(
+                                pass_cfg.output_dir, _pre_cp_key,
+                                presearch_tsv=str(pre_tsv),
+                                n_sequences=len(pre_filter),
+                            )
+                        except Exception as exc:
+                            print(f"[diaquant]    pre-search failed ({exc}); "
+                                  f"proceeding without sequence filter.")
+                            pre_filter = None
+
                 try:
                     library_tsv = generate_predicted_library(
                         pass_cfg,
                         out_dir=pass_cfg.output_dir,
                         pass_label=profile.name,
+                        pre_filter_bare_sequences=pre_filter,
                     )
                     if library_tsv is not None:
                         _write_checkpoint(

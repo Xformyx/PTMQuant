@@ -214,3 +214,121 @@ def run_sage_batched(cfg: DiaQuantConfig) -> Path:
     )
     print(f"[diaquant] merged {len(merged_df)} PSMs from {n_batches} batches → {merged_path}")
     return merged_path
+
+
+# ---------------------------------------------------------------------------
+# Pre-search: fast in-silico Sage pass to identify candidate sequences
+# ---------------------------------------------------------------------------
+
+def run_sage_presearch(cfg: DiaQuantConfig) -> Path:
+    """Run a quick Sage in-silico search to collect observed bare sequences.
+
+    This runs Sage with its built-in theoretical (in-silico) fragment ion
+    library — no AlphaPeptDeep required.  The purpose is NOT to produce a
+    high-quality identification list; it is only to identify which bare
+    peptide sequences are actually detectable in the data so that
+    AlphaPeptDeep prediction can be restricted to that subset.
+
+    Key differences from the main search
+    -------------------------------------
+    * ``report_psms = 5``        — report more candidates per spectrum
+    * ``predict_rt = false``     — skip the linear RT model (speeds up run)
+    * ``min_matched_peaks = 2``  — very permissive; we want recall, not precision
+    * Output written to ``<out_dir>/presearch/sage/``
+
+    Returns
+    -------
+    pathlib.Path
+        Path to ``results.sage.tsv`` from the pre-search.
+    """
+    from dataclasses import replace as _replace
+
+    pre_cfg = _replace(cfg)
+    pre_cfg.output_dir = Path(cfg.output_dir) / "presearch"
+    pre_cfg.output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build config like the main search but with looser / faster settings.
+    sage = build_sage_config(pre_cfg)
+
+    # Override for speed & recall: don't need RT prediction or tight scoring.
+    sage["predict_rt"]       = False
+    sage["report_psms"]      = 5       # more candidates per spectrum
+    sage["min_matched_peaks"] = 2      # very permissive
+    sage["min_peaks"]        = 8       # accept spectra with fewer peaks
+
+    out_dir = Path(sage["output_directory"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cfg_path = out_dir / "sage_config.json"
+    with open(cfg_path, "w") as fh:
+        json.dump(sage, fh, indent=2)
+
+    cmd = [cfg.sage_binary, str(cfg_path)]
+    if cfg.threads > 0:
+        os.environ["RAYON_NUM_THREADS"] = str(cfg.threads)
+
+    print(f"[diaquant] pre-search: running Sage in-silico pass: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=False)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Sage pre-search failed (exit code {result.returncode}). "
+            "Check the output above."
+        )
+
+    results = out_dir / "results.sage.tsv"
+    if not results.exists():
+        raise FileNotFoundError(
+            f"Sage pre-search finished but {results} was not produced."
+        )
+    return results
+
+
+def collect_presearch_sequences(
+    presearch_tsv: Path,
+    min_score: float = 5.0,
+) -> "set[str]":
+    """Parse the pre-search TSV and return a set of bare peptide sequences.
+
+    Parameters
+    ----------
+    presearch_tsv
+        Path to ``results.sage.tsv`` from :func:`run_sage_presearch`.
+    min_score
+        Minimum ``hyperscore`` value to include a sequence.  Setting this to
+        0 keeps every sequence Sage reported (maximum recall at the cost of
+        including a few spurious sequences — harmless since AlphaPeptDeep
+        still predicts correctly, we just predict a few extra rows).
+
+    Returns
+    -------
+    set[str]
+        Bare amino-acid sequences (no modification notation), upper-cased,
+        deduplicated.  Empty set if the TSV is missing or unreadable.
+    """
+    import re
+
+    if not presearch_tsv.exists():
+        return set()
+
+    try:
+        df = pd.read_csv(presearch_tsv, sep="\t", usecols=["peptide", "hyperscore"],
+                         low_memory=False)
+    except Exception as exc:
+        print(f"[diaquant] pre-search TSV unreadable ({exc}); skipping filter")
+        return set()
+
+    if df.empty:
+        return set()
+
+    if min_score > 0 and "hyperscore" in df.columns:
+        df = df[pd.to_numeric(df["hyperscore"], errors="coerce").fillna(0) >= min_score]
+
+    # Strip modification notation: "[+79.9663]" etc., also "rev_" decoy prefix.
+    _mod_re = re.compile(r"\[.*?\]")
+    seqs: set[str] = set()
+    for pep in df["peptide"].dropna().astype(str):
+        bare = _mod_re.sub("", pep).upper().lstrip("_").replace("rev_", "")
+        if bare:
+            seqs.add(bare)
+
+    print(f"[diaquant] pre-search: {len(df)} PSMs → {len(seqs)} unique bare sequences")
+    return seqs

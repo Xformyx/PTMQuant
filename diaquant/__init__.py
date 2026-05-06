@@ -31,6 +31,44 @@ Modules:
                       stub manifest on exception
 - cli:                click-based command-line interface
 
+v0.5.10 changes (the "pre-search filter + MBR OOM hardening" release):
+  P0.   Pre-search filter applied before AlphaPeptDeep predicted-library
+        construction prunes the candidate precursor pool by ~95%
+        (whole-proteome, multi-PTM jobs).  This was the primary cause of
+        the v0.5.9.x peak RSS ceiling on the Mac Studio (96 GB Docker
+        Desktop) and added unnecessary latency to every downstream step.
+        The filter retains decoys and FDR semantics; only candidates with
+        no mass-window / charge / RT overlap to the observed MS1 envelopes
+        are dropped before peptdeep is even called.  See commit a750c8d.
+  P0.   MBR donor-injection OOM hardening (commits 4825dee + c9ec319 +
+        c9fc342).  The donor table is now loaded with only the three
+        columns the matcher needs from the (often >40 GB) predicted
+        library; the predicted-donor injection path is disabled by
+        default (operators can re-enable via
+        ``mbr_inject_predicted_donors: true``); and ``psm_full`` is
+        filtered in place instead of via a full copy before slicing.
+        These three together remove the SIGKILL-on-MBR class of failure
+        observed on KBSI-46847.
+  P0.   Release AlphaPeptDeep / torch memory before spawning the Sage
+        subprocess (commit 19da1e9).  Without this the parent Python
+        process held ~30 GB of model weights + tensor caches alive while
+        Sage itself was already running, doubling peak RSS unnecessarily
+        and triggering the kernel OOM killer on borderline-sized hosts.
+  P1.   Streaming library join + checkpointing + JSON progress
+        (commit 00796d0).  The library merge no longer materialises the
+        full join in memory; per-pass checkpoints let an interrupted run
+        resume; and a new JSON-formatted progress stream feeds the
+        platform UI without parsing free-form log lines.  Cache key was
+        refined so semantically identical configs no longer rebuild the
+        library.
+  P1.   Per-run resource metrics logger (commits 9012b24 + ea9f218).
+        ``run_metrics_<YYYYMMDD_HHMMSS>.jsonl`` records RSS, CPU%,
+        wall-clock and per-step elapsed for every pipeline stage,
+        enabling post-mortem performance analysis without rerunning.
+  P2.   No new APIs; all v0.5.9.2 configuration knobs
+        (``pred_lib_chunk_size``, ``quant_num_cores``,
+        ``PTMQUANT_QUANT_CORES``, etc.) are preserved verbatim.
+
 v0.5.9.2 changes (the "directLFQ-dask quantification hotfix" release):
   P0.   directLFQ-based protein and site quantification now runs with
         ``dask`` parallelism on a worker pool sized by
@@ -214,4 +252,4 @@ v0.5.5 changes (the "observability + PTM" release):
         ``pass_phospho/`` / cache dir so multi-pass outputs are visible.
 """
 
-__version__ = "0.5.9.2"
+__version__ = "0.5.10"

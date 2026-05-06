@@ -33,6 +33,43 @@ Modules:
                       stub manifest on exception
 - cli:                click-based command-line interface
 
+v0.6.0a3 changes ("AlphaDIA Phase 2 — PTM-aware config builder"):
+  P1.   alphadia_runner.build_alphadia_config() now translates each
+        diaquant.ptm_profiles.PassProfile into a fully populated
+        AlphaDIA YAML dict.  Highlights:
+          * Variable / fixed modifications expand from PTMQuant built-in
+            names to AlphaDIA's `Name@Target` tokens, joined by `;`.
+            `Acetyl_Nterm` is rewritten to `Acetyl@Protein_N-term` so
+            alphabase recognises it; `Phospho` (targets S/T/Y) becomes
+            `Phospho@S;Phospho@T;Phospho@Y`; multi-target K/R PTMs
+            (Methyl, Dimethyl) expand symmetrically.
+          * Pass-level overrides (missed_cleavages, max_variable_mods,
+            min/max peptide length, max precursor charge, fragment
+            tolerance) win over the global DiaQuantConfig defaults.
+            None means "inherit".
+          * Per-pass peptide_fdr (0.05 for PTM passes, 0.01 for the
+            whole-proteome backbone) maps onto AlphaDIA's single
+            fdr.fdr cutoff.  This preserves the v0.5.8 PTM-FDR policy
+            ("5% peptide FDR for low-frequency PTM populations, 1% for
+            the proteome backbone") inside the new engine.
+          * Specialised PeptDeep model auto-selection: phospho pass
+            ->`peptdeep_model_type: phospho`; ubiquitin pass -> `digly`;
+            everything else -> `generic`.  This matches the family-
+            specific models PTMQuant has been using inside
+            predicted_library.py since v0.5.0.
+          * library_path argument flips library_prediction.enabled to
+            False so a v0.5.x AlphaPeptDeep TSV/HDF library is consumed
+            as-is rather than re-predicted by the engine.
+          * The audit block under _ptmquant in the emitted YAML records
+            the resolved tokens, FDR source, library mode, and PeptDeep
+            model choice for downstream run_manifest.json forensics.
+  P1.   tests/test_alphadia_runner.py (new): 16 cases covering whole
+        proteome / phospho / ubiquitin / acetyl_methyl / oglcnac
+        passes, library-path toggle, no-pass fallback, and a
+        parametrised sanity check that every built-in pass produces a
+        JSON-serialisable, schema-complete AlphaDIA config dict.  All
+        82 (66 smoke + 16 phase-2) tests pass on the v0.6.0a2 main env.
+
 v0.6.0a2 changes ("AlphaDIA Phase 1 — isolated venv hotfix"):
   P0.   Reinstall AlphaDIA into an isolated venv at /opt/alphadia-venv
         instead of the main Python env.  v0.6.0a1's flat install
@@ -311,4 +348,4 @@ v0.5.5 changes (the "observability + PTM" release):
         ``pass_phospho/`` / cache dir so multi-pass outputs are visible.
 """
 
-__version__ = "0.6.0a2"
+__version__ = "0.6.0a3"

@@ -33,6 +33,44 @@ Modules:
                       stub manifest on exception
 - cli:                click-based command-line interface
 
+v0.6.0a4 changes ("AlphaDIA Phase 3 — Result parser + DIA-NN UniMod output"):
+  P1.   New module `parse_alphadia` converts AlphaDIA's native
+        `precursor.tsv` / `precursor.parquet` output into the standard
+        long-form PSM table consumed by `quantify`, `mbr` and `writer`.
+        The 14-column rename map (`ALPHADIA_TO_DIANN`) carries every
+        downstream-relevant field; RT is converted from seconds to
+        minutes for parity with `parse_sage`; AlphaDIA decoys (rev_*
+        prefix) are dropped defensively even though AlphaDIA already
+        filters them internally.
+  P2.   `modifications.format_diann_sequence(sequence, mods, mod_sites)`
+        rebuilds the DIA-NN-style `Modified.Sequence` string from the
+        `(seq, mods, mod_sites)` triple AlphaDIA emits.  N-terminal
+        modifications (mod_site == 0) become `_(UniMod:1)PEPTIDE_`,
+        residue mods are placed inline (`_AAS(UniMod:21)PEPTIDER_`),
+        C-terminal mods (mod_site == -1) are appended.  Unknown mod
+        names fall back to `(ModName)` so nothing is silently dropped.
+        This satisfies the user requirement that `pr_matrix.tsv` be
+        drop-in compatible with any tool that already speaks DIA-NN's
+        UniMod token format.
+  P3.   New CLI command `diaquant parse-alphadia --precursor <file>
+        --fasta <file> --out <dir>` runs the full conversion and
+        downstream quant pipeline (precursor matrix normalisation +
+        protein-group LFQ + PTM-site quant) so users can evaluate the
+        AlphaDIA output side-by-side with `diaquant run` (Sage path).
+        Emits the same `report.pr_matrix.tsv`, `report.pg_matrix.tsv`,
+        `report.ptm_site_matrix.tsv`, `report.tsv` quartet.
+  P4.   23 new unit tests in `tests/test_parse_alphadia.py` cover the
+        formatter (10 cases: unmodified, single PTM, multi-PTM,
+        N-/C-term, unknown mods, length-mismatch defensive fallback)
+        and the parser (9 cases: standard columns, UniMod tokens,
+        decoy filtering, RT-min conversion, FDR filter, return_unfiltered
+        donor pool); 105/105 tests pass with no regression to the v0.5.10
+        Sage path.
+  P5.   The Phase 1 isolated-venv design continues to protect main env
+        (torch 2.2.2+cpu / peptdeep / transformers 4.47.0 untouched);
+        AlphaDIA is invoked exclusively via `subprocess` so there is
+        zero risk of dependency contamination.
+
 v0.6.0a3 changes ("AlphaDIA Phase 2 — PTM-aware config builder"):
   P1.   alphadia_runner.build_alphadia_config() now translates each
         diaquant.ptm_profiles.PassProfile into a fully populated
@@ -348,4 +386,4 @@ v0.5.5 changes (the "observability + PTM" release):
         ``pass_phospho/`` / cache dir so multi-pass outputs are visible.
 """
 
-__version__ = "0.6.0a3"
+__version__ = "0.6.0a4"

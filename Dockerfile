@@ -86,12 +86,21 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PTMQUANT_LIB_CACHE_DIR=/cache/predicted_libs
 
 # ---- Base OS packages + Sage binary -------------------------------------
+# v0.6.0 P0: mono-runtime + libmono-system-data4.0-cil are required by the
+# Thermo .raw reader inside alpharaw (the AlphaDIA backend) on Linux.
+# Without them, AlphaDIA falls back to mzML-only and cannot consume the
+# native Orbitrap output that PTMQuant targets.  The two packages add
+# ~120 MB to the final image, which is acceptable for a search-engine
+# upgrade that closes the v0.5.x recall gap (32% -> 70%+ vs DIA-NN).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates \
         wget \
         tar \
- && rm -rf /var/lib/apt/lists/*
+        mono-runtime \
+        libmono-system-data4.0-cil \
+ && rm -rf /var/lib/apt/lists/* \
+ && mono --version | head -1
 
 RUN set -eux; \
     cd /tmp; \
@@ -150,6 +159,21 @@ RUN set -eux; \
         # ---- v0.5.9.2 P0: fail-fast smoke test for the dask path so a
         # regression of this acceleration never reaches GHCR.
         python -c "import dask, dask.dataframe; print('dask path OK, dask=' + dask.__version__)" ; \
+        # ---- v0.6.0 Phase 1 P0: install AlphaDIA (Apache-2.0, MannLabs).
+        # AlphaDIA is the v0.6.x replacement for Sage as the primary DIA
+        # search engine.  It is library-driven (vs Sage's in-silico digest),
+        # so AlphaPeptDeep's predicted library finally becomes a first-class
+        # search input rather than a post-hoc rescoring afterthought.
+        # We pin transformers/numba/numpy AGAIN after the alphadia install
+        # because alphadia's dependency tree may relax those constraints.
+        pip install --no-cache-dir "alphadia[stable]" ; \
+        pip install --no-cache-dir \
+            "transformers==4.47.0" "numba==0.60.0" "numpy<2" ; \
+        # Fail-fast smoke test for the AlphaDIA install: import the
+        # top-level module and exercise --help so a broken install can
+        # never reach GHCR.
+        python -c "import alphadia; print('alphadia import OK, version=' + getattr(alphadia, '__version__', 'unknown'))" ; \
+        alphadia --help >/dev/null 2>&1 && echo "alphadia --help OK" ; \
         # ---- v0.5.9 P0: fail-fast import smoke test BEFORE downloading models.
         # If peptdeep cannot even be imported, fail the build immediately so a
         # broken image is never published to GHCR.  Previously this silently

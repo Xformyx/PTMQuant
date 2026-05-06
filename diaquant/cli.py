@@ -283,6 +283,23 @@ def list_passes() -> None:
             click.echo(f"    max_variable_mods      = {profile.max_variable_mods}")
 
 
+@cli.command("probe-alphadia")
+def probe_alphadia_cmd() -> None:
+    """v0.6.0 Phase 1: report whether the AlphaDIA engine is available
+    inside this image, plus its resolved binary path and version.
+
+    Used by CI and by PTM-platform's pre-flight check to confirm the
+    upgrade landed.  Exits with code 0 when alphadia is reachable,
+    non-zero otherwise (so it can be wired into a Docker HEALTHCHECK).
+    """
+    from diaquant.alphadia_runner import probe_alphadia
+    probe = probe_alphadia()
+    import json as _json
+    click.echo(_json.dumps(probe.as_dict(), indent=2))
+    if not probe.available:
+        raise SystemExit(2)
+
+
 @cli.command("run")
 @click.option("--config", "cfg_path", required=True,
               type=click.Path(exists=True, dir_okay=False))

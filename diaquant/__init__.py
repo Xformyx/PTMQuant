@@ -7,6 +7,8 @@ Modules:
 - modifications:      UniMod / custom PTM definitions
 - ptm_profiles:       PTM-family-specific Sage search profiles (multi-pass)
 - sage_runner:        build Sage JSON config and invoke the binary
+- alphadia_runner:    v0.6.0 Phase 1 — invoke the AlphaDIA CLI; will
+                      replace sage_runner as the primary engine in v0.6.0
 - multipass:          run several PTM passes and merge their results; v0.5.5
                       can return the unfiltered PSM pool needed for MBR
 - predicted_library:  AlphaPeptDeep predicted spectral library (0.5.0);
@@ -30,6 +32,44 @@ Modules:
                       predicted_library_*.tsv in pass subdirs + emits a
                       stub manifest on exception
 - cli:                click-based command-line interface
+
+v0.6.0a1 changes (the "AlphaDIA Phase 1 — Docker integration" alpha):
+  P0.   Add `mono-runtime` + `libmono-system-data4.0-cil` to the base
+        image.  These are required by `alpharaw` (the AlphaDIA backend)
+        to read Thermo `.raw` files on Linux.  Without them, AlphaDIA
+        falls back to mzML-only and cannot consume native Orbitrap
+        output, which is exactly the data class PTMQuant targets.
+  P0.   Install `alphadia[stable]` (Apache-2.0, MannLabs).  AlphaDIA is
+        the v0.6.x replacement for Sage as the primary DIA search engine.
+        It is library-driven: AlphaPeptDeep's predicted library finally
+        becomes a first-class search input rather than a post-hoc
+        rescoring afterthought.  See Wallmann et al., Nat Biotechnol
+        (2025): "alphaDIA closes the loop between spectral library
+        prediction and DIA search."
+  P0.   Re-pin `transformers==4.47.0` + `numba==0.60.0` + `numpy<2`
+        AFTER the alphadia install so its dependency tree cannot relax
+        the v0.5.9 ABI guarantees.
+  P0.   Build-time fail-fast smoke tests: `import alphadia` and
+        `alphadia --help` must both succeed before the image is
+        published to GHCR, mirroring the v0.5.9 peptdeep fail-fast
+        policy.
+  P1.   New module `diaquant.alphadia_runner` with `probe_alphadia()`,
+        `build_alphadia_config()` and `run_alphadia()`.  Phase 1 ships
+        only the skeleton (CLI invocation + diagnostic probe); Phase 2
+        will populate the YAML config builder with PTM-aware variable
+        mods, pass-specific FDR, and MBR settings; Phase 3 will hand the
+        AlphaDIA precursor TSV to a new `parse_alphadia.py` and on into
+        the existing directLFQ + dask quantification path that v0.5.9.2
+        accelerated.
+  P1.   New CLI command `diaquant probe-alphadia` emits a JSON probe
+        suitable for PTM-platform's pre-flight check.  Exits non-zero
+        when alphadia is unreachable, so it can be wired into a Docker
+        HEALTHCHECK or CI gate.
+  P2.   No behavioural change to the v0.5.10 Sage path — every existing
+        knob (`pred_lib_chunk_size`, `quant_num_cores`,
+        `mbr_inject_predicted_donors`, etc.) is preserved verbatim.
+        v0.5.10 remains the production-recommended tag until v0.6.0
+        promotes out of alpha.
 
 v0.5.10 changes (the "pre-search filter + MBR OOM hardening" release):
   P0.   Pre-search filter applied before AlphaPeptDeep predicted-library
@@ -252,4 +292,4 @@ v0.5.5 changes (the "observability + PTM" release):
         ``pass_phospho/`` / cache dir so multi-pass outputs are visible.
 """
 
-__version__ = "0.5.10"
+__version__ = "0.6.0a1"

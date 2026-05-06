@@ -33,6 +33,25 @@ Modules:
                       stub manifest on exception
 - cli:                click-based command-line interface
 
+v0.6.0a2 changes ("AlphaDIA Phase 1 — isolated venv hotfix"):
+  P0.   Reinstall AlphaDIA into an isolated venv at /opt/alphadia-venv
+        instead of the main Python env.  v0.6.0a1's flat install
+        upgraded torch 2.2.2+cpu -> 2.6.0+cu124 but left torchvision
+        0.17.2 behind, producing
+            RuntimeError: operator torchvision::nms does not exist
+        at the next `from peptdeep.pretrained_models import ModelManager`
+        smoke test, killing the Docker build.  The venv approach
+        guarantees the v0.5.10 CPU-only stack (torch 2.2.2+cpu,
+        peptdeep, transformers 4.47.0, numba 0.60.0, numpy<2) is left
+        bit-identical, while the `alphadia` CLI is exposed via a
+        symlink at /usr/local/bin/alphadia.
+  P0.   Add explicit regression-guard smoke tests in the Dockerfile:
+           python -c "import torch, transformers, numba, numpy"
+           python -c "from peptdeep.pretrained_models import ModelManager"
+        Both must pass AFTER the alphadia install or the build fails
+        fast.  This guarantees v0.6.0+ images can never silently break
+        the validated v0.5.10 quantification path.
+
 v0.6.0a1 changes (the "AlphaDIA Phase 1 — Docker integration" alpha):
   P0.   Add `mono-runtime` + `libmono-system-data4.0-cil` to the base
         image.  These are required by `alpharaw` (the AlphaDIA backend)
@@ -292,4 +311,4 @@ v0.5.5 changes (the "observability + PTM" release):
         ``pass_phospho/`` / cache dir so multi-pass outputs are visible.
 """
 
-__version__ = "0.6.0a1"
+__version__ = "0.6.0a2"

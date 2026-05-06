@@ -159,21 +159,33 @@ RUN set -eux; \
         # ---- v0.5.9.2 P0: fail-fast smoke test for the dask path so a
         # regression of this acceleration never reaches GHCR.
         python -c "import dask, dask.dataframe; print('dask path OK, dask=' + dask.__version__)" ; \
-        # ---- v0.6.0 Phase 1 P0: install AlphaDIA (Apache-2.0, MannLabs).
-        # AlphaDIA is the v0.6.x replacement for Sage as the primary DIA
-        # search engine.  It is library-driven (vs Sage's in-silico digest),
-        # so AlphaPeptDeep's predicted library finally becomes a first-class
-        # search input rather than a post-hoc rescoring afterthought.
-        # We pin transformers/numba/numpy AGAIN after the alphadia install
-        # because alphadia's dependency tree may relax those constraints.
-        pip install --no-cache-dir "alphadia[stable]" ; \
-        pip install --no-cache-dir \
-            "transformers==4.47.0" "numba==0.60.0" "numpy<2" ; \
-        # Fail-fast smoke test for the AlphaDIA install: import the
-        # top-level module and exercise --help so a broken install can
-        # never reach GHCR.
-        python -c "import alphadia; print('alphadia import OK, version=' + getattr(alphadia, '__version__', 'unknown'))" ; \
+        # ---- v0.6.0a2 P0: install AlphaDIA in an *isolated venv* so its
+        # exact pins (scipy==1.12, torch>=2.5+cu12, transformers 4.51, etc.)
+        # do NOT clobber the v0.5.10 CPU-only stack we just built.
+        # v0.6.0a1 (5b875e1) attempted a flat `pip install alphadia[stable]`
+        # in the main env; alphadia upgraded torch 2.2.2+cpu -> 2.6.0+cu124
+        # but left torchvision 0.17.2 behind, producing
+        # `RuntimeError: operator torchvision::nms does not exist` at the
+        # next `from peptdeep.pretrained_models import ModelManager` smoke
+        # test.  The venv approach is also forward-compatible with future
+        # alphadia releases that will likely keep tightening their pins.
+        # Footprint: ~1.5 GB extra image size (torch 2.6 + cuda runtimes),
+        # which is still acceptable for the v0.6 generation upgrade.
+        # Default behaviour is already 'no system site packages'; explicit comment for clarity.
+        python -m venv /opt/alphadia-venv ; \
+        /opt/alphadia-venv/bin/pip install --upgrade pip ; \
+        /opt/alphadia-venv/bin/pip install --no-cache-dir "alphadia[stable]" ; \
+        # Expose only the alphadia CLI on PATH.  We deliberately do NOT
+        # symlink the venv's `python` so callers who type `python` from
+        # the main env still get our v0.5.10 stack with peptdeep+torch 2.2.
+        ln -s /opt/alphadia-venv/bin/alphadia /usr/local/bin/alphadia ; \
+        # Fail-fast smoke test that uses the venv's python directly so we
+        # don't accidentally import the alphadia bits via the main env.
+        /opt/alphadia-venv/bin/python -c "import alphadia; print('alphadia import OK, version=' + getattr(alphadia, '__version__', 'unknown'))" ; \
         alphadia --help >/dev/null 2>&1 && echo "alphadia --help OK" ; \
+        # Verify the v0.5.10 main env was NOT mutated (regression guard).
+        python -c "import torch, transformers, numba, numpy; print(f'main-env intact: torch={torch.__version__} transformers={transformers.__version__} numba={numba.__version__} numpy={numpy.__version__}')" ; \
+        python -c "from peptdeep.pretrained_models import ModelManager; print('peptdeep still importable in main env')" ; \
         # ---- v0.5.9 P0: fail-fast import smoke test BEFORE downloading models.
         # If peptdeep cannot even be imported, fail the build immediately so a
         # broken image is never published to GHCR.  Previously this silently

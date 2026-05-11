@@ -16,7 +16,7 @@ behaviour.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import click
 import pandas as pd
@@ -281,6 +281,23 @@ def list_passes() -> None:
             click.echo(f"    missed_cleavages       = {profile.missed_cleavages}")
         if profile.max_variable_mods is not None:
             click.echo(f"    max_variable_mods      = {profile.max_variable_mods}")
+
+
+@cli.command("probe-alphadia")
+def probe_alphadia_cmd() -> None:
+    """v0.6.0 Phase 1: report whether the AlphaDIA engine is available
+    inside this image, plus its resolved binary path and version.
+
+    Used by CI and by PTM-platform's pre-flight check to confirm the
+    upgrade landed.  Exits with code 0 when alphadia is reachable,
+    non-zero otherwise (so it can be wired into a Docker HEALTHCHECK).
+    """
+    from diaquant.alphadia_runner import probe_alphadia
+    probe = probe_alphadia()
+    import json as _json
+    click.echo(_json.dumps(probe.as_dict(), indent=2))
+    if not probe.available:
+        raise SystemExit(2)
 
 
 @cli.command("run")
@@ -717,6 +734,83 @@ def run(cfg_path: str, resume: bool) -> None:
     click.echo(f"  wrote {out/'report.tsv'}")
     if manifest_path:
         click.echo(f"  wrote {manifest_path}")
+
+
+@cli.command("parse-alphadia")
+@click.option("--precursor", "precursor_path", required=True,
+              type=click.Path(exists=True, dir_okay=False),
+              help="AlphaDIA output precursor.tsv or precursor.parquet file.")
+@click.option("--fasta", "fasta_path", required=True,
+              type=click.Path(exists=True, dir_okay=False),
+              help="FASTA file for protein metadata join.")
+@click.option("--out", "out_dir", required=True,
+              type=click.Path(file_okay=False),
+              help="Output directory for pr/pg/site matrix TSVs.")
+@click.option("--site-cutoff", default=0.75, type=float, show_default=True)
+@click.option("--peptide-fdr", default=None, type=float,
+              help="Optional secondary FDR filter on top of AlphaDIA's own.")
+@click.option("--min-samples", default=1, type=int, show_default=True,
+              help="directLFQ min_samples for protein quant.")
+def parse_alphadia_cmd(precursor_path: str, fasta_path: str, out_dir: str,
+                       site_cutoff: float, peptide_fdr: Optional[float],
+                       min_samples: int) -> None:
+    """v0.6.0 Phase 3: convert an AlphaDIA precursor file into the standard
+    PTMQuant report set (pr_matrix, pg_matrix, ptm_site_matrix, report.tsv).
+
+    The Modified.Sequence column is emitted in the DIA-NN UniMod format
+    (e.g. ``_AAS(UniMod:21)PEPTIDER_``) so the resulting pr_matrix.tsv is
+    drop-in compatible with any tool that already speaks DIA-NN.
+
+    This command is the alpha entry point used to evaluate AlphaDIA against
+    the existing Sage pipeline (``diaquant run``); production should keep
+    using ``diaquant run`` until v0.6.0 final.
+    """
+    from pathlib import Path as _P
+    from .parse_alphadia import parse_alphadia_precursor, attach_fasta_meta
+    from .quantify import (
+        precursor_matrix_normalized, protein_quant, site_quant,
+    )
+    from .writer import (
+        PR_COLS, PG_COLS,
+        write_main_report, write_pg_matrix, write_pr_matrix, write_site_matrix,
+    )
+
+    out = _P(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    click.secho(f"[diaquant {__version__}] parse-alphadia", fg="green")
+    click.echo(f"  precursor: {precursor_path}")
+    click.echo(f"  fasta    : {fasta_path}")
+    click.echo(f"  out      : {out}")
+
+    long_df = parse_alphadia_precursor(
+        _P(precursor_path),
+        site_cutoff=site_cutoff,
+        peptide_fdr=peptide_fdr,
+    )
+    click.echo(f"  loaded {len(long_df)} PSMs")
+    if long_df.empty:
+        click.secho("[diaquant] No PSMs survived parsing -- aborting.", fg="yellow")
+        return
+
+    long_df = attach_fasta_meta(long_df, _P(fasta_path))
+    pr_wide = precursor_matrix_normalized(long_df)
+    pg_lfq = protein_quant(long_df, min_samples=min_samples)
+    site_lfq = site_quant(long_df, min_samples=min_samples,
+                          localization_cutoff=site_cutoff)
+
+    write_pr_matrix(pr_wide, out / "report.pr_matrix.tsv")
+    write_pg_matrix(pg_lfq, pr_wide, out / "report.pg_matrix.tsv")
+    write_site_matrix(site_lfq, out / "report.ptm_site_matrix.tsv")
+    write_main_report(long_df, out / "report.tsv")
+
+    click.secho("[diaquant] parse-alphadia done.", fg="green")
+    click.echo(f"  wrote {out/'report.pr_matrix.tsv'} "
+               f"({len(pr_wide)} precursors)")
+    click.echo(f"  wrote {out/'report.pg_matrix.tsv'} "
+               f"({len(pg_lfq) if pg_lfq is not None else 0} proteins)")
+    click.echo(f"  wrote {out/'report.ptm_site_matrix.tsv'} "
+               f"({len(site_lfq) if site_lfq is not None else 0} sites)")
+    click.echo(f"  wrote {out/'report.tsv'}")
 
 
 if __name__ == "__main__":

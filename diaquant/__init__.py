@@ -7,6 +7,8 @@ Modules:
 - modifications:      UniMod / custom PTM definitions
 - ptm_profiles:       PTM-family-specific Sage search profiles (multi-pass)
 - sage_runner:        build Sage JSON config and invoke the binary
+- alphadia_runner:    v0.6.0 Phase 1 — invoke the AlphaDIA CLI; will
+                      replace sage_runner as the primary engine in v0.6.0
 - multipass:          run several PTM passes and merge their results; v0.5.5
                       can return the unfiltered PSM pool needed for MBR
 - predicted_library:  AlphaPeptDeep predicted spectral library (0.5.0);
@@ -30,6 +32,138 @@ Modules:
                       predicted_library_*.tsv in pass subdirs + emits a
                       stub manifest on exception
 - cli:                click-based command-line interface
+
+v0.6.0a4 changes ("AlphaDIA Phase 3 — Result parser + DIA-NN UniMod output"):
+  P1.   New module `parse_alphadia` converts AlphaDIA's native
+        `precursor.tsv` / `precursor.parquet` output into the standard
+        long-form PSM table consumed by `quantify`, `mbr` and `writer`.
+        The 14-column rename map (`ALPHADIA_TO_DIANN`) carries every
+        downstream-relevant field; RT is converted from seconds to
+        minutes for parity with `parse_sage`; AlphaDIA decoys (rev_*
+        prefix) are dropped defensively even though AlphaDIA already
+        filters them internally.
+  P2.   `modifications.format_diann_sequence(sequence, mods, mod_sites)`
+        rebuilds the DIA-NN-style `Modified.Sequence` string from the
+        `(seq, mods, mod_sites)` triple AlphaDIA emits.  N-terminal
+        modifications (mod_site == 0) become `_(UniMod:1)PEPTIDE_`,
+        residue mods are placed inline (`_AAS(UniMod:21)PEPTIDER_`),
+        C-terminal mods (mod_site == -1) are appended.  Unknown mod
+        names fall back to `(ModName)` so nothing is silently dropped.
+        This satisfies the user requirement that `pr_matrix.tsv` be
+        drop-in compatible with any tool that already speaks DIA-NN's
+        UniMod token format.
+  P3.   New CLI command `diaquant parse-alphadia --precursor <file>
+        --fasta <file> --out <dir>` runs the full conversion and
+        downstream quant pipeline (precursor matrix normalisation +
+        protein-group LFQ + PTM-site quant) so users can evaluate the
+        AlphaDIA output side-by-side with `diaquant run` (Sage path).
+        Emits the same `report.pr_matrix.tsv`, `report.pg_matrix.tsv`,
+        `report.ptm_site_matrix.tsv`, `report.tsv` quartet.
+  P4.   23 new unit tests in `tests/test_parse_alphadia.py` cover the
+        formatter (10 cases: unmodified, single PTM, multi-PTM,
+        N-/C-term, unknown mods, length-mismatch defensive fallback)
+        and the parser (9 cases: standard columns, UniMod tokens,
+        decoy filtering, RT-min conversion, FDR filter, return_unfiltered
+        donor pool); 105/105 tests pass with no regression to the v0.5.10
+        Sage path.
+  P5.   The Phase 1 isolated-venv design continues to protect main env
+        (torch 2.2.2+cpu / peptdeep / transformers 4.47.0 untouched);
+        AlphaDIA is invoked exclusively via `subprocess` so there is
+        zero risk of dependency contamination.
+
+v0.6.0a3 changes ("AlphaDIA Phase 2 — PTM-aware config builder"):
+  P1.   alphadia_runner.build_alphadia_config() now translates each
+        diaquant.ptm_profiles.PassProfile into a fully populated
+        AlphaDIA YAML dict.  Highlights:
+          * Variable / fixed modifications expand from PTMQuant built-in
+            names to AlphaDIA's `Name@Target` tokens, joined by `;`.
+            `Acetyl_Nterm` is rewritten to `Acetyl@Protein_N-term` so
+            alphabase recognises it; `Phospho` (targets S/T/Y) becomes
+            `Phospho@S;Phospho@T;Phospho@Y`; multi-target K/R PTMs
+            (Methyl, Dimethyl) expand symmetrically.
+          * Pass-level overrides (missed_cleavages, max_variable_mods,
+            min/max peptide length, max precursor charge, fragment
+            tolerance) win over the global DiaQuantConfig defaults.
+            None means "inherit".
+          * Per-pass peptide_fdr (0.05 for PTM passes, 0.01 for the
+            whole-proteome backbone) maps onto AlphaDIA's single
+            fdr.fdr cutoff.  This preserves the v0.5.8 PTM-FDR policy
+            ("5% peptide FDR for low-frequency PTM populations, 1% for
+            the proteome backbone") inside the new engine.
+          * Specialised PeptDeep model auto-selection: phospho pass
+            ->`peptdeep_model_type: phospho`; ubiquitin pass -> `digly`;
+            everything else -> `generic`.  This matches the family-
+            specific models PTMQuant has been using inside
+            predicted_library.py since v0.5.0.
+          * library_path argument flips library_prediction.enabled to
+            False so a v0.5.x AlphaPeptDeep TSV/HDF library is consumed
+            as-is rather than re-predicted by the engine.
+          * The audit block under _ptmquant in the emitted YAML records
+            the resolved tokens, FDR source, library mode, and PeptDeep
+            model choice for downstream run_manifest.json forensics.
+  P1.   tests/test_alphadia_runner.py (new): 16 cases covering whole
+        proteome / phospho / ubiquitin / acetyl_methyl / oglcnac
+        passes, library-path toggle, no-pass fallback, and a
+        parametrised sanity check that every built-in pass produces a
+        JSON-serialisable, schema-complete AlphaDIA config dict.  All
+        82 (66 smoke + 16 phase-2) tests pass on the v0.6.0a2 main env.
+
+v0.6.0a2 changes ("AlphaDIA Phase 1 — isolated venv hotfix"):
+  P0.   Reinstall AlphaDIA into an isolated venv at /opt/alphadia-venv
+        instead of the main Python env.  v0.6.0a1's flat install
+        upgraded torch 2.2.2+cpu -> 2.6.0+cu124 but left torchvision
+        0.17.2 behind, producing
+            RuntimeError: operator torchvision::nms does not exist
+        at the next `from peptdeep.pretrained_models import ModelManager`
+        smoke test, killing the Docker build.  The venv approach
+        guarantees the v0.5.10 CPU-only stack (torch 2.2.2+cpu,
+        peptdeep, transformers 4.47.0, numba 0.60.0, numpy<2) is left
+        bit-identical, while the `alphadia` CLI is exposed via a
+        symlink at /usr/local/bin/alphadia.
+  P0.   Add explicit regression-guard smoke tests in the Dockerfile:
+           python -c "import torch, transformers, numba, numpy"
+           python -c "from peptdeep.pretrained_models import ModelManager"
+        Both must pass AFTER the alphadia install or the build fails
+        fast.  This guarantees v0.6.0+ images can never silently break
+        the validated v0.5.10 quantification path.
+
+v0.6.0a1 changes (the "AlphaDIA Phase 1 — Docker integration" alpha):
+  P0.   Add `mono-runtime` + `libmono-system-data4.0-cil` to the base
+        image.  These are required by `alpharaw` (the AlphaDIA backend)
+        to read Thermo `.raw` files on Linux.  Without them, AlphaDIA
+        falls back to mzML-only and cannot consume native Orbitrap
+        output, which is exactly the data class PTMQuant targets.
+  P0.   Install `alphadia[stable]` (Apache-2.0, MannLabs).  AlphaDIA is
+        the v0.6.x replacement for Sage as the primary DIA search engine.
+        It is library-driven: AlphaPeptDeep's predicted library finally
+        becomes a first-class search input rather than a post-hoc
+        rescoring afterthought.  See Wallmann et al., Nat Biotechnol
+        (2025): "alphaDIA closes the loop between spectral library
+        prediction and DIA search."
+  P0.   Re-pin `transformers==4.47.0` + `numba==0.60.0` + `numpy<2`
+        AFTER the alphadia install so its dependency tree cannot relax
+        the v0.5.9 ABI guarantees.
+  P0.   Build-time fail-fast smoke tests: `import alphadia` and
+        `alphadia --help` must both succeed before the image is
+        published to GHCR, mirroring the v0.5.9 peptdeep fail-fast
+        policy.
+  P1.   New module `diaquant.alphadia_runner` with `probe_alphadia()`,
+        `build_alphadia_config()` and `run_alphadia()`.  Phase 1 ships
+        only the skeleton (CLI invocation + diagnostic probe); Phase 2
+        will populate the YAML config builder with PTM-aware variable
+        mods, pass-specific FDR, and MBR settings; Phase 3 will hand the
+        AlphaDIA precursor TSV to a new `parse_alphadia.py` and on into
+        the existing directLFQ + dask quantification path that v0.5.9.2
+        accelerated.
+  P1.   New CLI command `diaquant probe-alphadia` emits a JSON probe
+        suitable for PTM-platform's pre-flight check.  Exits non-zero
+        when alphadia is unreachable, so it can be wired into a Docker
+        HEALTHCHECK or CI gate.
+  P2.   No behavioural change to the v0.5.10 Sage path — every existing
+        knob (`pred_lib_chunk_size`, `quant_num_cores`,
+        `mbr_inject_predicted_donors`, etc.) is preserved verbatim.
+        v0.5.10 remains the production-recommended tag until v0.6.0
+        promotes out of alpha.
 
 v0.5.10 changes (the "pre-search filter + MBR OOM hardening" release):
   P0.   Pre-search filter applied before AlphaPeptDeep predicted-library
@@ -252,4 +386,4 @@ v0.5.5 changes (the "observability + PTM" release):
         ``pass_phospho/`` / cache dir so multi-pass outputs are visible.
 """
 
-__version__ = "0.5.10"
+__version__ = "0.6.0a4"

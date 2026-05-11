@@ -66,6 +66,132 @@ DEFAULT_MODIFICATIONS: Dict[str, Modification] = {
 }
 
 
+# ---- AlphaDIA -> DIA-NN modified-sequence formatter (v0.6.0 Phase 3) ----
+# Reverse lookup: modification name -> UniMod ID, built once from the catalogue.
+_NAME_TO_UNIMOD: Dict[str, int] = {
+    name: mod.unimod_id
+    for name, mod in DEFAULT_MODIFICATIONS.items()
+    if mod.unimod_id is not None
+}
+# Some AlphaDIA / alphabase mod names map onto multiple PTMQuant entries
+# (e.g. ``Acetyl`` is used both for K side-chain and protein N-term).  We
+# resolve them at format time using the residue / position context.
+_ALPHA_NAME_ALIASES = {
+    "Acetyl@Protein_N-term": 1,   # UniMod:1 (Acetyl on protein N-terminus)
+    "Acetyl@Protein N-term": 1,
+    "Acetyl@Any_N-term":     1,
+    "Acetyl@Any N-term":     1,
+    "Carbamidomethyl@C":     4,   # fixed mod -- usually omitted from PSM mods
+    "Oxidation@M":          35,
+    "Phospho@S":            21, "Phospho@T": 21, "Phospho@Y": 21,
+    "GlyGly@K":            121,
+    "Acetyl@K":              1,   # K side-chain acetyl shares UniMod:1
+    "Methyl@K":             34, "Methyl@R": 34,
+    "Dimethyl@K":           36, "Dimethyl@R": 36,
+    "Trimethyl@K":          37,
+}
+
+
+def _resolve_unimod(mod_name: str) -> Optional[int]:
+    """Return the UniMod accession for an AlphaDIA mod token.
+
+    AlphaDIA emits mods either as a bare name (``"Phospho"``) or as a fully
+    qualified ``"Name@Target"`` token (``"Acetyl@Protein_N-term"``).  We try the
+    qualified alias first so we can disambiguate Acetyl-N-term (UniMod:1) from
+    K-side-chain Acetyl (also UniMod:1, but documented separately upstream).
+    Returns ``None`` for unknown mods so the caller can fall back to the bare
+    name -- never a silent KeyError.
+    """
+    if not mod_name:
+        return None
+    if mod_name in _ALPHA_NAME_ALIASES:
+        return _ALPHA_NAME_ALIASES[mod_name]
+    bare = mod_name.split("@", 1)[0]
+    return _NAME_TO_UNIMOD.get(bare)
+
+
+def format_diann_sequence(sequence: str,
+                          mods: str,
+                          mod_sites: str) -> str:
+    """Format an AlphaDIA ``(sequence, mods, mod_sites)`` triple into the
+    DIA-NN-style ``Modified.Sequence`` string.
+
+    The DIA-NN convention used throughout PTMQuant is:
+
+    * Bare sequence wrapped in underscores (``_PEPTIDE_``).
+    * Modifications inline as ``(UniMod:N)`` immediately *after* the residue
+      they sit on; e.g. ``_PEPS(UniMod:21)IDE_`` for Phospho-on-S at site 4.
+    * N-terminal modifications appear at the very start, *before* the first
+      residue: ``_(UniMod:1)PEPTIDE_``.  AlphaDIA encodes the N-term position
+      as ``mod_site == "0"``.
+    * C-terminal modifications appear at the very end, *after* the last
+      residue: ``_PEPTIDE(UniMod:30)_``.  AlphaDIA encodes the C-term as
+      ``mod_site == "-1"`` (or ``len(sequence) + 1`` in some library variants).
+
+    Unknown modifications fall back to ``(ModName)`` so nothing is silently
+    dropped -- the resulting peptide is still a valid DIA-NN modified-sequence
+    token (DIA-NN itself accepts custom names enclosed in parens).
+
+    Parameters
+    ----------
+    sequence
+        Bare amino-acid sequence (e.g. ``"AASPEPTIDER"``).
+    mods
+        Semicolon-separated mod names from AlphaDIA's ``precursor.mods``
+        column.  Empty string / NaN means no modifications.
+    mod_sites
+        Semicolon-separated 1-based residue positions matching ``mods``.
+        Special values: ``"0"`` for protein N-term, ``"-1"`` for C-term.
+    """
+    if not isinstance(sequence, str) or not sequence:
+        return ""
+
+    # No mods -> just wrap in underscores so the column type stays consistent.
+    if not isinstance(mods, str) or not mods.strip():
+        return f"_{sequence}_"
+    if not isinstance(mod_sites, str) or not mod_sites.strip():
+        return f"_{sequence}_"
+
+    mod_list = [m for m in mods.split(";") if m]
+    site_list = [s for s in mod_sites.split(";") if s != ""]
+    if len(mod_list) != len(site_list):
+        # Schema violation -- play it safe and return the bare sequence.
+        return f"_{sequence}_"
+
+    nterm_tags: List[str] = []
+    cterm_tags: List[str] = []
+    # site -> list of tags (peptides can carry multiple mods per residue,
+    # though it's vanishingly rare in PTM passes -- preserve order).
+    inline_tags: Dict[int, List[str]] = {}
+
+    for mod_name, site_str in zip(mod_list, site_list):
+        unimod = _resolve_unimod(mod_name)
+        bare_name = mod_name.split("@", 1)[0]
+        tag = f"(UniMod:{unimod})" if unimod is not None else f"({bare_name})"
+        try:
+            site = int(site_str)
+        except (TypeError, ValueError):
+            continue
+        if site == 0:
+            nterm_tags.append(tag)
+        elif site == -1 or site > len(sequence):
+            cterm_tags.append(tag)
+        else:
+            inline_tags.setdefault(site, []).append(tag)
+
+    # Build the formatted string.  We walk left-to-right so the inline tags
+    # land in the right slot.
+    parts: List[str] = ["_"]
+    parts.extend(nterm_tags)
+    for idx, residue in enumerate(sequence, start=1):
+        parts.append(residue)
+        if idx in inline_tags:
+            parts.extend(inline_tags[idx])
+    parts.extend(cterm_tags)
+    parts.append("_")
+    return "".join(parts)
+
+
 def parse_user_modifications(items: Iterable[dict]) -> List[Modification]:
     """Parse a list of dictionaries from the YAML config into Modification objects.
 

@@ -375,9 +375,15 @@ def test_rescore_skipped_when_disabled(tmp_path):
 
 
 def test_version_is_050():
-    """The package reports a 0.5.x version (kept name for git-history grep)."""
+    """The package reports a 0.5.x or 0.6.x version (kept name for git-history grep).
+
+    v0.6.0a1 (Phase 1 of the AlphaDIA migration) extends this beyond the
+    0.5.x line; the test now accepts either family until v0.6.0 is
+    promoted to stable, at which point the 0.5.x branch can be dropped.
+    """
     import diaquant
-    assert diaquant.__version__.startswith("0.5.")
+    v = diaquant.__version__
+    assert v.startswith("0.5.") or v.startswith("0.6."), f"unexpected version: {v}"
 
 
 # ---------------------------------------------------------------------------
@@ -1016,8 +1022,12 @@ def test_verify_ptmquant_passes_for_healthy_output(tmp_path):
 
     import pathlib
     script = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "verify_ptmquant.py"
+    # The fixture manifest declares diaquant_version=0.5.10; pin the verifier's
+    # expectation so it doesn't trip on v0.6.0a1's auto-detected min-version
+    # (which would otherwise be a forward-comparison against a back-dated fixture).
     result = subprocess.run(
-        [sys.executable, str(script), str(tmp_path), "--json"],
+        [sys.executable, str(script), str(tmp_path),
+         "--json", "--min-version", "0.5.5"],
         capture_output=True, text=True,
     )
     assert result.returncode == 0, (result.stdout, result.stderr)

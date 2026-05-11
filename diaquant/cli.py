@@ -283,6 +283,152 @@ def list_passes() -> None:
             click.echo(f"    max_variable_mods      = {profile.max_variable_mods}")
 
 
+# ---------------------------------------------------------------------------
+# v0.6.0a5: AlphaDIA search dispatcher used by `diaquant run --engine alphadia`
+# ---------------------------------------------------------------------------
+
+def _run_search_alphadia(
+    cfg: "DiaQuantConfig",
+    resume: bool = False,
+    library_override: Optional[str] = None,
+) -> "pd.DataFrame":
+    """v0.6.0a5: invoke AlphaDIA on every requested pass and return the
+    concatenated PSM long-form DataFrame in the standard PTMQuant schema.
+
+    Single-pass behaviour (no ``passes`` in YAML) calls AlphaDIA exactly
+    once with the global ``cfg`` modifications.  Multi-pass behaviour calls
+    AlphaDIA once per :class:`PassProfile`, tags each PSM with ``Pass`` and
+    concatenates.  Either way, the returned ``long_df`` is the same
+    interface the Sage path uses, so downstream RT/MBR/razor/quant code
+    runs unchanged.
+
+    ``resume=True`` skips the AlphaDIA subprocess for any pass whose
+    output ``precursor.tsv`` (or ``.parquet``) already exists.  This is
+    the AlphaDIA twin of the Sage ``resume`` flag.
+
+    A failure in any single pass propagates as an :class:`AlphaDIAError`
+    — we do **not** silently fall back to Sage; that policy mirrors the
+    ``pred_lib_fallback_in_silico=False`` default introduced in v0.5.9.1.
+    """
+    from .alphadia_runner import run_alphadia, AlphaDIAError
+    from .parse_alphadia import parse_alphadia_precursor, attach_fasta_meta
+    from .ptm_profiles import PASS_PROFILES
+
+    pass_names: List[str] = list(cfg.passes or [])
+    custom_passes: List[dict] = list(cfg.custom_passes or [])
+
+    pass_profiles: list = []
+    if pass_names:
+        for name in pass_names:
+            profile = PASS_PROFILES.get(name)
+            if profile is None:
+                raise click.ClickException(
+                    f"Unknown built-in pass {name!r}; valid names: "
+                    f"{sorted(PASS_PROFILES)}"
+                )
+            pass_profiles.append(profile)
+    for p in custom_passes:
+        # Phase 4 keeps custom_passes simple: name + variable_modifications + fdr.
+        # Promotion to a PassProfile dataclass happens via PASS_PROFILES merge
+        # in v0.6.0 final; for the alpha we synthesise an inline profile.
+        from .ptm_profiles import PassProfile
+        pass_profiles.append(PassProfile(
+            name=str(p.get("name", "custom")),
+            description=str(p.get("description", "custom pass")),
+            variable_modifications=tuple(p.get("variable_modifications", []) or []),
+            peptide_fdr=p.get("peptide_fdr"),
+            missed_cleavages=p.get("missed_cleavages"),
+            max_variable_mods=p.get("max_variable_mods"),
+            site_probability_cutoff=p.get("site_probability_cutoff"),
+        ))
+    if not pass_profiles:
+        # Single-pass: a None pass_profile drives build_alphadia_config()
+        # to use the global cfg.variable_modifications.
+        pass_profiles = [None]
+
+    library_path = Path(library_override).resolve() if library_override else None
+    if library_path is not None:
+        click.echo(f"  alphadia library: precomputed = {library_path}")
+    else:
+        click.echo(f"  alphadia library: in-engine prediction from {cfg.fasta}")
+
+    frames: list = []
+    base_out = cfg.output_dir / "alphadia"
+    base_out.mkdir(parents=True, exist_ok=True)
+
+    for profile in pass_profiles:
+        pass_name = getattr(profile, "name", "single")
+        pass_out = base_out / pass_name
+        pass_out.mkdir(parents=True, exist_ok=True)
+        click.secho(f"  — pass: {pass_name}", fg="cyan")
+
+        # Discover existing precursor output for resume
+        precursor_files = sorted(
+            list(pass_out.glob("precursor*.tsv")) +
+            list(pass_out.glob("precursor*.parquet"))
+        )
+        if resume and precursor_files:
+            click.echo(f"    resume: reusing cached {precursor_files[0].name}")
+            precursor_path = precursor_files[0]
+        else:
+            try:
+                run_alphadia(
+                    cfg,
+                    pass_profile=profile,
+                    library_path=library_path,
+                    output_dir=pass_out,
+                )
+            except AlphaDIAError as exc:
+                raise click.ClickException(f"AlphaDIA failed on pass {pass_name!r}: {exc}")
+            precursor_files = sorted(
+                list(pass_out.glob("precursor*.tsv")) +
+                list(pass_out.glob("precursor*.parquet"))
+            )
+            if not precursor_files:
+                raise click.ClickException(
+                    f"AlphaDIA produced no precursor output for pass {pass_name!r} "
+                    f"(searched {pass_out})"
+                )
+            precursor_path = precursor_files[0]
+
+        # Per-pass FDR (alpha falls back to global cfg.peptide_fdr)
+        peptide_fdr = (
+            float(profile.peptide_fdr)
+            if profile is not None and getattr(profile, "peptide_fdr", None) is not None
+            else float(getattr(cfg, "peptide_fdr", 0.01))
+        )
+        site_cutoff = (
+            float(profile.site_probability_cutoff)
+            if profile is not None and
+            getattr(profile, "site_probability_cutoff", None) is not None
+            else float(getattr(cfg, "site_probability_cutoff", 0.75))
+        )
+        df = parse_alphadia_precursor(
+            precursor_path,
+            site_cutoff=site_cutoff,
+            peptide_fdr=peptide_fdr,
+        )
+        df["Pass"] = pass_name
+        frames.append(df)
+        click.echo(f"    parsed {len(df)} PSMs (peptide_fdr={peptide_fdr}, "
+                   f"site_cutoff={site_cutoff})")
+
+    if not frames:
+        return pd.DataFrame()
+
+    # Concat and attach FASTA metadata once (cheap; mirrors parse_sage path)
+    long_df = pd.concat(frames, ignore_index=True)
+    long_df = attach_fasta_meta(long_df, cfg.fasta)
+
+    # Track minimal manifest fields the writer expects (parity with Sage path)
+    long_df.attrs.setdefault("predicted_library_paths",
+                             [str(library_path)] if library_path else [])
+    long_df.attrs.setdefault("n_psms_raw_total", len(long_df))
+    long_df.attrs.setdefault("n_psms_rescored_total", 0)
+    long_df.attrs["engine"] = "alphadia"
+    return long_df
+
+
 @cli.command("probe-alphadia")
 def probe_alphadia_cmd() -> None:
     """v0.6.0 Phase 1: report whether the AlphaDIA engine is available
@@ -306,22 +452,38 @@ def probe_alphadia_cmd() -> None:
 @click.option("--resume", is_flag=True, default=False,
               help="Skip Sage searches for passes where results.sage.tsv already exists. "
                    "Useful for resuming an interrupted run.")
-def run(cfg_path: str, resume: bool) -> None:
-    """Execute the full Sage → directLFQ → DIA-NN-style export pipeline."""
+@click.option("--engine",
+              type=click.Choice(["alphadia", "sage"], case_sensitive=False),
+              default="alphadia", show_default=True,
+              help="Search engine. v0.6.0+: AlphaDIA is the DIA-native default. "
+                   "Use 'sage' only for legacy DDA workflows or A/B comparisons.")
+@click.option("--library", "library_override", default=None,
+              type=click.Path(exists=True, dir_okay=False),
+              help="Optional pre-computed predicted library path (for AlphaDIA engine). "
+                   "When omitted, AlphaDIA predicts the library from FASTA at runtime.")
+def run(cfg_path: str, resume: bool, engine: str, library_override: Optional[str]) -> None:
+    """Execute the full search → directLFQ → DIA-NN-style export pipeline.
+
+    v0.6.0+ default engine is AlphaDIA (DIA-native, library-driven). The Sage
+    engine path is preserved (--engine sage) for legacy DDA-style workflows
+    and for v0.5.x A/B regression checks; new DIA work should use AlphaDIA.
+    """
+    engine = engine.lower()
     cfg = DiaQuantConfig.from_yaml(cfg_path)
     # Initialise metrics logger — must be called before any record_event()
     set_metrics_dir(cfg.output_dir)
     record_event("pipeline", "start",
                  version=__version__,
+                 engine=engine,
                  n_mzml=len(cfg.mzml_files),
                  fasta=str(cfg.fasta),
                  passes=cfg.passes + [p["name"] for p in cfg.custom_passes])
-    click.secho(f"[diaquant {__version__}] starting", fg="green")
+    click.secho(f"[diaquant {__version__}] starting (engine={engine})", fg="green")
     click.echo(f"  fasta : {cfg.fasta}")
     click.echo(f"  mzml  : {len(cfg.mzml_files)} files")
     click.echo(f"  out   : {cfg.output_dir}")
     if resume:
-        click.echo(f"  mode  : resume (cached Sage results will be reused)")
+        click.echo(f"  mode  : resume (cached search results will be reused)")
 
     # Auto-batch report
     if cfg.batch_size > 0 and cfg.batch_size < len(cfg.mzml_files):
@@ -333,8 +495,18 @@ def run(cfg_path: str, resume: bool) -> None:
             fg="cyan",
         )
 
-    if cfg.passes or cfg.custom_passes:
-        click.echo(f"  mode  : multi-pass ({cfg.passes + [p['name'] for p in cfg.custom_passes]})")
+    # ---- v0.6.0a5: AlphaDIA engine branch -------------------------------
+    # The Sage path below is preserved bit-identical for --engine sage.
+    # AlphaDIA replaces ONLY the search step; downstream RT alignment, MBR,
+    # razor grouping, directLFQ, imputation and writer are reused.
+    if engine == "alphadia":
+        long_df = _run_search_alphadia(
+            cfg,
+            resume=resume,
+            library_override=library_override,
+        )
+    elif cfg.passes or cfg.custom_passes:
+        click.echo(f"  mode  : multi-pass-sage ({cfg.passes + [p['name'] for p in cfg.custom_passes]})")
         long_df, _per_pass = run_multipass(cfg, resume=resume)
     else:
         click.echo(f"  mode  : single-pass (vars={cfg.variable_modifications})")

@@ -33,6 +33,41 @@ Modules:
                       stub manifest on exception
 - cli:                click-based command-line interface
 
+v0.6.0a5 changes ("AlphaDIA Phase 4 — Default engine = AlphaDIA"):
+  P0.   `diaquant run` now defaults to AlphaDIA (`--engine alphadia`).
+        The web UI's "New Job" button therefore launches an AlphaDIA
+        search end-to-end without any UI changes.  Sage path is
+        preserved bit-identical for `--engine sage` (legacy DDA / A-B).
+  P1.   New `_run_search_alphadia` dispatcher in `diaquant.cli`:
+          * iterates over each requested `PassProfile`
+            (`cfg.passes` + `cfg.custom_passes`);
+          * writes per-pass output under `<out>/alphadia/<pass>/`;
+          * threads per-pass `peptide_fdr` and `site_probability_cutoff`
+            into `parse_alphadia_precursor` (so e.g. phospho stays at
+            FDR=0.05 while whole_proteome stays at 0.01);
+          * concatenates per-pass DataFrames with a `Pass` column,
+            attaches FASTA metadata once, and feeds the unchanged
+            downstream RT/MBR/razor/directLFQ/writer pipeline.
+  P1.   New `--library` flag: when supplied, AlphaDIA loads the user-
+        provided AlphaPeptDeep TSV/HDF library as-is
+        (`library_prediction.enabled: false`).  When omitted, AlphaDIA
+        predicts the library from FASTA at runtime using the pass-aware
+        PeptDeep model (phospho / digly / generic) selected in Phase 2.
+  P1.   New `--resume` semantics for the AlphaDIA path: per-pass
+        precursor.{tsv,parquet} files act as the cache key.  Matches the
+        Sage path's `results.sage.tsv` cache idiom.
+  P2.   AlphaDIA failures surface as `click.ClickException` (no silent
+        fallback to Sage).  Same fail-fast policy as the v0.5.9.1
+        `pred_lib_fallback_in_silico=False` default.
+  P3.   tests/test_engine_flag.py (new): 10 cases covering --engine
+        flag presence + default, dispatcher single-pass and multi-pass
+        iteration, --resume cache hit, AlphaDIA failure propagation,
+        unknown-pass error, library-override threading, per-pass FDR
+        threading, and a guard test that the click `default='alphadia'`
+        cannot be silently flipped back to sage.  All 115/115 tests
+        pass on the v0.6.0a5 main env (66 v0.5.10 smoke + 16 phase-2 +
+        23 phase-3 + 10 phase-4).
+
 v0.6.0a4 changes ("AlphaDIA Phase 3 — Result parser + DIA-NN UniMod output"):
   P1.   New module `parse_alphadia` converts AlphaDIA's native
         `precursor.tsv` / `precursor.parquet` output into the standard
@@ -386,4 +421,4 @@ v0.5.5 changes (the "observability + PTM" release):
         ``pass_phospho/`` / cache dir so multi-pass outputs are visible.
 """
 
-__version__ = "0.6.0a4"
+__version__ = "0.6.0a5"

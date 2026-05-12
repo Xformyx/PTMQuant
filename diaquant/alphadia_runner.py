@@ -238,39 +238,17 @@ def _peptdeep_model_type_for(pass_profile: Optional["PassProfile"]) -> str:
 # Config builder
 # ---------------------------------------------------------------------------
 
-def build_alphadia_config(
+def _alphadia_config_and_audit(
     cfg: "DiaQuantConfig",
     pass_profile: Optional["PassProfile"] = None,
     library_path: Optional[Path] = None,
     output_dir: Optional[Path] = None,
-) -> dict:
-    """Translate the PTMQuant ``DiaQuantConfig`` (+ optional ``PassProfile``)
-    into an AlphaDIA YAML config (returned as a dict; the caller serialises
-    it).
+) -> tuple[dict, dict]:
+    """Build *(alphadia_config_dict, ptmquant_audit_dict)*.
 
-    Phase 2 contract:
-
-      * **Variable & fixed modifications** are expanded from PTMQuant
-        built-in names to AlphaDIA's ``Name@Target`` tokens, joined by
-        ``;``.  ``Acetyl_Nterm`` is translated to ``Acetyl@Protein_N-term``.
-      * **Pass-level overrides** (``missed_cleavages``,
-        ``max_variable_mods``, ``min/max_peptide_length``,
-        ``max_precursor_charge``) take precedence over the global
-        ``DiaQuantConfig`` defaults; ``None`` means "inherit".
-      * **FDR**: per-pass ``peptide_fdr`` (or global if no pass) drives
-        the single AlphaDIA ``fdr.fdr`` cutoff.  AlphaDIA does not
-        distinguish PSM / peptide / protein FDR at config level — it
-        applies the same cutoff at every stage of competitive scoring,
-        which matches the Bekker-Jensen / Sage convention we already use.
-      * **PeptDeep model**: ``phospho`` pass → ``phospho`` model;
-        ``ubiquitin`` pass → ``digly``; everything else → ``generic``.
-      * **Library mode**: when a pre-computed ``library_path`` is supplied
-        (the v0.5.x AlphaPeptDeep TSV/HDF), AlphaDIA's
-        ``library_prediction.enabled`` flips to ``False`` so the engine
-        consumes the library as-is rather than re-predicting.
-
-    The returned mapping uses AlphaDIA's snake_case keys so that
-    ``yaml.safe_dump`` of the result is a valid AlphaDIA config.
+    The first dict is AlphaDIA-legal only (no ``_*`` PTMQuant extensions);
+    the second is written to ``ptmquant_alphadia_meta.json`` so
+    run-manifest consumers can still audit pass / FDR / library mode.
     """
     out_dir = Path(output_dir) if output_dir else Path(cfg.output_dir) / "alphadia"
     raw_paths: list[str] = [str(Path(p).resolve()) for p in cfg.mzml_files]
@@ -381,29 +359,51 @@ def build_alphadia_config(
             "inference_strategy": "heuristic",
         },
 
-        # ---- Pass metadata (recorded so run_manifest can audit which pass
-        #      drove which AlphaDIA invocation) ------------------------
-        "_ptmquant": {
-            "pass_name": getattr(pass_profile, "name", None),
-            "pass_is_whole_proteome": bool(
-                getattr(pass_profile, "is_whole_proteome", False)
-            ) if pass_profile is not None else None,
-            "engine": "alphadia",
-            "engine_phase": "v0.6.0a3-phase2",
-            "ptmquant_var_mods_resolved": var_tokens,
-            "ptmquant_fixed_mods_resolved": fixed_tokens,
-            "ptmquant_fdr_source": (
-                "pass_profile.peptide_fdr"
-                if pass_profile is not None and pass_profile.peptide_fdr is not None
-                else "cfg.peptide_fdr"
-            ),
-            "ptmquant_peptdeep_model_type": peptdeep_model_type,
-            "ptmquant_library_mode": (
-                "precomputed" if library_path else "in_engine_prediction"
-            ),
-        },
     }
-    return config
+
+    audit: dict = {
+        "pass_name": getattr(pass_profile, "name", None),
+        "pass_is_whole_proteome": bool(
+            getattr(pass_profile, "is_whole_proteome", False)
+        ) if pass_profile is not None else None,
+        "engine": "alphadia",
+        "engine_phase": "v0.6.0a3-phase2",
+        "ptmquant_var_mods_resolved": var_tokens,
+        "ptmquant_fixed_mods_resolved": fixed_tokens,
+        "ptmquant_fdr_source": (
+            "pass_profile.peptide_fdr"
+            if pass_profile is not None and pass_profile.peptide_fdr is not None
+            else "cfg.peptide_fdr"
+        ),
+        "ptmquant_peptdeep_model_type": peptdeep_model_type,
+        "ptmquant_library_mode": (
+            "precomputed" if library_path else "in_engine_prediction"
+        ),
+    }
+    # AlphaDIA 2.x treats the instance YAML as layered updates onto defaults;
+    # arbitrary top-level keys (e.g. ``_ptmquant``) raise CONFIG_ERROR.  Keep
+    # PTMQuant-only metadata in ``ptmquant_alphadia_meta.json`` beside the YAML.
+    return config, audit
+
+
+def build_alphadia_config(
+    cfg: "DiaQuantConfig",
+    pass_profile: Optional["PassProfile"] = None,
+    library_path: Optional[Path] = None,
+    output_dir: Optional[Path] = None,
+) -> dict:
+    """Return the AlphaDIA subprocess config dict **only** (no PTMQuant keys).
+
+    Audit metadata formerly under ``_ptmquant`` is written next to the YAML by
+    :func:`run_alphadia` as ``ptmquant_alphadia_meta.json``.
+    """
+    alphadia_payload, _audit = _alphadia_config_and_audit(
+        cfg,
+        pass_profile=pass_profile,
+        library_path=library_path,
+        output_dir=output_dir,
+    )
+    return alphadia_payload
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +447,7 @@ def run_alphadia(
             "Rebuild the v0.6.0+ image or install with `pip install alphadia[stable]`."
         )
 
-    cfg_dict = build_alphadia_config(
+    cfg_dict, audit = _alphadia_config_and_audit(
         cfg,
         pass_profile=pass_profile,
         library_path=library_path,
@@ -458,12 +458,14 @@ def run_alphadia(
     # YAML subset, which keeps this module free of a hard PyYAML import.
     config_path = out_dir / "alphadia_config.yaml"
     config_path.write_text(json.dumps(cfg_dict, indent=2, sort_keys=False))
+    meta_path = out_dir / "ptmquant_alphadia_meta.json"
+    meta_path.write_text(json.dumps(audit, indent=2, sort_keys=False), encoding="utf-8")
 
     cmd: list[str] = [probe.binary, "--config", str(config_path), *map(str, extra_args)]
 
     log.info(json.dumps({
         "event": "alphadia_start",
-        "pass": cfg_dict["_ptmquant"]["pass_name"],
+        "pass": audit.get("pass_name"),
         "binary": probe.binary,
         "version": probe.version,
         "config": str(config_path),
@@ -491,7 +493,7 @@ def run_alphadia(
 
     log.info(json.dumps({
         "event": "alphadia_done",
-        "pass": cfg_dict["_ptmquant"]["pass_name"],
+        "pass": audit.get("pass_name"),
         "elapsed_sec": round(elapsed, 2),
         "output_dir": str(out_dir),
     }))

@@ -12,8 +12,9 @@ These tests exercise the PTM-aware mapping introduced in v0.6.0a3:
   5. Per-pass numeric overrides (``missed_cleavages``,
      ``max_variable_mods``, ``site_probability_cutoff`` indirectly via
      ``peptide_fdr``) override the global ``DiaQuantConfig`` defaults.
-  6. The ``_ptmquant`` audit block records the resolved tokens, FDR
-     source, and library mode for downstream ``run_manifest.json``.
+  6. PTMQuant audit metadata is paired with the AlphaDIA dict (not embedded
+     — AlphaDIA 2.x rejects unknown top-level YAML keys) and is persisted
+     by ``run_alphadia`` as ``ptmquant_alphadia_meta.json``.
 
 Tests follow the existing ``tests/test_smoke.py`` style: plain pytest
 functions, no external fixtures, no AlphaDIA installation required
@@ -25,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from diaquant.alphadia_runner import build_alphadia_config
+from diaquant.alphadia_runner import _alphadia_config_and_audit, build_alphadia_config
 from diaquant.config import DiaQuantConfig
 from diaquant.ptm_profiles import PASS_PROFILES
 
@@ -53,9 +54,8 @@ def _cfg(tmp_path: Path) -> DiaQuantConfig:
 
 def test_whole_proteome_pass_uses_global_fdr_and_generic_model(tmp_path: Path):
     cfg = _cfg(tmp_path)
-    out = build_alphadia_config(cfg, pass_profile=PASS_PROFILES["whole_proteome"])
-
-    # Global pass keeps the conservative 1% FDR (it drives protein quant).
+    out, audit = _alphadia_config_and_audit(cfg, pass_profile=PASS_PROFILES["whole_proteome"])
+    assert all(not k.startswith("_") for k in out)
     assert out["fdr"]["fdr"] == pytest.approx(0.01)
     # No specialised PeptDeep model for the backbone pass.
     assert out["library_prediction"]["peptdeep_model_type"] == "generic"
@@ -70,8 +70,7 @@ def test_whole_proteome_pass_uses_global_fdr_and_generic_model(tmp_path: Path):
     assert out["library_prediction"]["fixed_modifications"] == "Carbamidomethyl@C"
     # Inference defaults to gene-level, matching PTMQuant downstream.
     assert out["fdr"]["group_level"] == "genes"
-    # Audit block records the resolved tokens.
-    audit = out["_ptmquant"]
+    # Sidecar audit records the resolved tokens.
     assert audit["pass_name"] == "whole_proteome"
     assert audit["pass_is_whole_proteome"] is True
     assert audit["ptmquant_fdr_source"] == "cfg.peptide_fdr"
@@ -84,7 +83,7 @@ def test_whole_proteome_pass_uses_global_fdr_and_generic_model(tmp_path: Path):
 
 def test_phospho_pass_expands_sty_and_relaxes_fdr(tmp_path: Path):
     cfg = _cfg(tmp_path)
-    out = build_alphadia_config(cfg, pass_profile=PASS_PROFILES["phospho"])
+    out, audit = _alphadia_config_and_audit(cfg, pass_profile=PASS_PROFILES["phospho"])
 
     # 5% peptide FDR (Bekker-Jensen 2020 phospho-DIA convention) maps onto
     # AlphaDIA's single fdr.fdr cutoff.
@@ -99,7 +98,7 @@ def test_phospho_pass_expands_sty_and_relaxes_fdr(tmp_path: Path):
     # Pass override: 3 variable mods (vs global default 2).
     assert out["library_prediction"]["max_var_mod_num"] == 3
     # Audit confirms the FDR came from the pass profile.
-    assert out["_ptmquant"]["ptmquant_fdr_source"] == "pass_profile.peptide_fdr"
+    assert audit["ptmquant_fdr_source"] == "pass_profile.peptide_fdr"
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +150,7 @@ def test_library_path_disables_library_prediction(tmp_path: Path):
     lib = tmp_path / "predicted_library.tsv"
     lib.write_text("modified_sequence\tcharge\nPEPTIDER\t2\n")
 
-    out = build_alphadia_config(
+    out, audit = _alphadia_config_and_audit(
         cfg,
         pass_profile=PASS_PROFILES["whole_proteome"],
         library_path=lib,
@@ -159,15 +158,15 @@ def test_library_path_disables_library_prediction(tmp_path: Path):
 
     assert out["library_path"] == str(lib.resolve())
     assert out["library_prediction"]["enabled"] is False
-    assert out["_ptmquant"]["ptmquant_library_mode"] == "precomputed"
+    assert audit["ptmquant_library_mode"] == "precomputed"
 
 
 def test_no_library_path_enables_in_engine_prediction(tmp_path: Path):
     cfg = _cfg(tmp_path)
-    out = build_alphadia_config(cfg, pass_profile=PASS_PROFILES["whole_proteome"])
+    out, audit = _alphadia_config_and_audit(cfg, pass_profile=PASS_PROFILES["whole_proteome"])
     assert out["library_path"] is None
     assert out["library_prediction"]["enabled"] is True
-    assert out["_ptmquant"]["ptmquant_library_mode"] == "in_engine_prediction"
+    assert audit["ptmquant_library_mode"] == "in_engine_prediction"
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +175,7 @@ def test_no_library_path_enables_in_engine_prediction(tmp_path: Path):
 
 def test_no_pass_profile_falls_back_to_cfg(tmp_path: Path):
     cfg = _cfg(tmp_path)
-    out = build_alphadia_config(cfg, pass_profile=None)
+    out, audit = _alphadia_config_and_audit(cfg, pass_profile=None)
     # cfg.peptide_fdr default is 0.01.
     assert out["fdr"]["fdr"] == pytest.approx(0.01)
     assert out["library_prediction"]["peptdeep_model_type"] == "generic"
@@ -185,8 +184,8 @@ def test_no_pass_profile_falls_back_to_cfg(tmp_path: Path):
     assert "Oxidation@M" in var
     assert "Acetyl@Protein_N-term" in var
     # Audit records the fallback source.
-    assert out["_ptmquant"]["ptmquant_fdr_source"] == "cfg.peptide_fdr"
-    assert out["_ptmquant"]["pass_name"] is None
+    assert audit["ptmquant_fdr_source"] == "cfg.peptide_fdr"
+    assert audit["pass_name"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -216,9 +215,12 @@ def test_all_builtin_passes_produce_valid_alphadia_config(
     cfg = _cfg(tmp_path)
     out = build_alphadia_config(cfg, pass_profile=PASS_PROFILES[pass_name])
 
+    assert "_ptmquant" not in out
+    assert not any(k.startswith("_") for k in out), f"{pass_name}: underscore top-level keys forbidden for AlphaDIA 2.x"
+
     # Required AlphaDIA top-level keys.
     for key in ("raw_paths", "output_directory", "library_prediction",
-                "search", "fdr", "_ptmquant"):
+                "search", "fdr"):
         assert key in out, f"{pass_name}: missing top-level key {key!r}"
 
     # Required library_prediction keys.
@@ -235,3 +237,34 @@ def test_all_builtin_passes_produce_valid_alphadia_config(
 
     # Must be JSON-serialisable so we can write it as YAML at runtime.
     json.dumps(out)
+
+
+def test_run_alphadia_writes_only_alphadia_keys_in_yaml(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AlphaDIA 2.x merges user YAML onto defaults — unknown keys -> CONFIG_ERROR."""
+    import json
+    import subprocess as sp
+
+    from diaquant.alphadia_runner import (
+        AlphaDIAProbe,
+        run_alphadia,
+    )
+
+    monkeypatch.setattr(
+        "diaquant.alphadia_runner.probe_alphadia",
+        lambda **kw: AlphaDIAProbe(True, "/fake/bin/alphadia", "2.1.1", None),
+    )
+    monkeypatch.setattr(sp, "run", lambda *_a, **_k: sp.CompletedProcess([], 0))
+
+    cfg = _cfg(tmp_path)
+    out_dir = tmp_path / "alphadia_pass"
+    run_alphadia(cfg, pass_profile=PASS_PROFILES["phospho"], output_dir=out_dir)
+
+    loaded = json.loads((out_dir / "alphadia_config.yaml").read_text())
+    assert "_ptmquant" not in loaded
+    assert all(not str(k).startswith("_") for k in loaded)
+
+    meta = json.loads((out_dir / "ptmquant_alphadia_meta.json").read_text())
+    assert meta["pass_name"] == "phospho"

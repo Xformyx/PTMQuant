@@ -133,9 +133,9 @@ v0.6.0a3 changes ("AlphaDIA Phase 2 — PTM-aware config builder"):
           * library_path argument flips library_prediction.enabled to
             False so a v0.5.x AlphaPeptDeep TSV/HDF library is consumed
             as-is rather than re-predicted by the engine.
-          * The audit block under _ptmquant in the emitted YAML records
-            the resolved tokens, FDR source, library mode, and PeptDeep
-            model choice for downstream run_manifest.json forensics.
+          * PTMQuant audit metadata (formerly a ``_ptmquant`` block in YAML) is
+            written as ``ptmquant_alphadia_meta.json`` next to ``alphadia_config.yaml``
+            — AlphaDIA 2.x rejects unknown top-level YAML keys when merging configs.
   P1.   tests/test_alphadia_runner.py (new): 16 cases covering whole
         proteome / phospho / ubiquitin / acetyl_methyl / oglcnac
         passes, library-path toggle, no-pass fallback, and a

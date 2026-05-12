@@ -16,6 +16,8 @@ The whole stack is permissively licensed (Apache-2.0 / MIT) and can therefore be
 | 4. RT alignment | `diaquant.rt_align` | Apache-2.0 | LOWESS run-to-run retention-time alignment (always-on) |
 | 5. Output | `diaquant.writer` | Apache-2.0 | DIA-NN-style `report.pr_matrix.tsv`, `report.pg_matrix.tsv`, plus PTM-site matrix and RT-alignment statistics |
 
+**AlphaDIA (v0.6.0+):** `--engine alphadia` uses [AlphaDIA](https://doi.org/10.1038/s41587-025-02845-z) instead of Sage for library-driven DIA search. For **AlphaDIA 2.1.1+** compatibility, the instance config YAML written under `alphadia/` contains only official keys — PTMQuant audit fields are stored in `ptmquant_alphadia_meta.json` beside it (nothing starting with `_` is injected into the AlphaDIA config).
+
 The optional `[deeplearning]` extra installs **AlphaPeptDeep** (Apache-2.0) to enable on-the-fly RT/MS² prediction and transfer learning for non-canonical PTMs (introduced in 0.5.0).
 
 ## Installation

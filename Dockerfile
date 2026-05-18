@@ -48,8 +48,11 @@ FROM python:3.11-slim
 
 # ---- Build-time arguments ------------------------------------------------
 ARG SAGE_VERSION=0.14.7
-ARG SAGE_TARBALL=sage-v${SAGE_VERSION}-x86_64-unknown-linux-gnu.tar.gz
-ARG SAGE_URL=https://github.com/lazear/sage/releases/download/v${SAGE_VERSION}/${SAGE_TARBALL}
+# Sage ships separate tarballs for x86_64 and aarch64 (ARM64).
+# We detect the build platform at RUN time so the same Dockerfile works on
+# both Intel/AMD hosts (CI, Linux servers) and Apple-Silicon Macs.
+# TARGETARCH is set automatically by Docker BuildKit to "amd64" or "arm64".
+ARG SAGE_VERSION_ARG=${SAGE_VERSION}
 ARG WITH_ALPHAPEPTDEEP=1
 ARG PEPTDEEP_STRICT=0
 # Filled by the GHCR workflow via --build-arg; kept here so OCI labels
@@ -85,28 +88,54 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     # (see v0.5.3 release notes).  Users can override this at run time.
     PTMQUANT_LIB_CACHE_DIR=/cache/predicted_libs
 
-# ---- Base OS packages + Sage binary -------------------------------------
-# v0.6.0 P0: mono-runtime + libmono-system-data4.0-cil are required by the
-# Thermo .raw reader inside alpharaw (the AlphaDIA backend) on Linux.
-# Without them, AlphaDIA falls back to mzML-only and cannot consume the
-# native Orbitrap output that PTMQuant targets.  The two packages add
-# ~120 MB to the final image, which is acceptable for a search-engine
-# upgrade that closes the v0.5.x recall gap (32% -> 70%+ vs DIA-NN).
+# ---- Base OS packages ----------------------------------------------------
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates \
         wget \
         tar \
-        mono-runtime \
-        libmono-system-data4.0-cil \
- && rm -rf /var/lib/apt/lists/* \
- && mono --version | head -1
+ && apt-get install -y --no-install-recommends \
+        $(apt-cache search '^libicu[0-9]' 2>/dev/null | sort -rn | head -1 | awk '{print $1}') \
+ && rm -rf /var/lib/apt/lists/*
 
+# ---- .NET 8 Runtime (for pythonnet coreclr mode) -------------------------
+# AlphaDIA's alpharaw component uses Python.NET (pythonnet) to interface
+# with .NET assemblies (Thermo .raw reader, etc.).  On ARM64 Linux the
+# Debian mono-runtime-sgen package ships ONLY the mono-sgen executable and
+# does NOT install libmonosgen-2.0.so, so clr_loader's find_libmono() always
+# returns None and pythonnet fails with "RuntimeError: Could not find libmono".
+# .NET 8 Runtime is fully supported on both aarch64 and x86_64 Linux and
+# provides the hostfxr / coreclr shared libraries that clr_loader discovers
+# via DOTNET_ROOT.  Setting PYTHONNET_RUNTIME=coreclr tells pythonnet to
+# bypass Mono entirely and use the coreclr backend instead.
+ARG DOTNET_CHANNEL=8.0
+RUN wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh \
+ && chmod +x /tmp/dotnet-install.sh \
+ && /tmp/dotnet-install.sh --channel ${DOTNET_CHANNEL} --runtime dotnet \
+        --install-dir /opt/dotnet --no-path \
+ && rm /tmp/dotnet-install.sh \
+ && /opt/dotnet/dotnet --info | grep -E 'Version|Arch'
+
+ENV DOTNET_ROOT=/opt/dotnet \
+    PATH=/opt/dotnet:${PATH} \
+    PYTHONNET_RUNTIME=coreclr
+
+ARG SAGE_VERSION=${SAGE_VERSION_ARG}
 RUN set -eux; \
     cd /tmp; \
+    # Detect the container's CPU architecture and pick the matching Sage tarball.
+    # Docker BuildKit sets TARGETARCH to "amd64" on Intel/AMD and "arm64" on Apple Silicon.
+    ARCH="$(uname -m)"; \
+    case "${ARCH}" in \
+        x86_64)   SAGE_ARCH="x86_64-unknown-linux-gnu" ;; \
+        aarch64)  SAGE_ARCH="aarch64-unknown-linux-gnu" ;; \
+        *)        echo "Unsupported architecture: ${ARCH}" >&2; exit 1 ;; \
+    esac; \
+    SAGE_TARBALL="sage-v${SAGE_VERSION}-${SAGE_ARCH}.tar.gz"; \
+    SAGE_URL="https://github.com/lazear/sage/releases/download/v${SAGE_VERSION}/${SAGE_TARBALL}"; \
     wget -q "${SAGE_URL}"; \
     tar xzf "${SAGE_TARBALL}"; \
-    install -m 0755 sage-v${SAGE_VERSION}-x86_64-unknown-linux-gnu/sage /usr/local/bin/sage; \
+    install -m 0755 "sage-v${SAGE_VERSION}-${SAGE_ARCH}/sage" /usr/local/bin/sage; \
     rm -rf /tmp/sage-*; \
     sage --version
 
@@ -182,6 +211,7 @@ RUN set -eux; \
         # Fail-fast smoke test that uses the venv's python directly so we
         # don't accidentally import the alphadia bits via the main env.
         /opt/alphadia-venv/bin/python -c "import alphadia; print('alphadia import OK, version=' + getattr(alphadia, '__version__', 'unknown'))" ; \
+        alphadia --version && echo "alphadia --version OK" ; \
         alphadia --help >/dev/null 2>&1 && echo "alphadia --help OK" ; \
         # Verify the v0.5.10 main env was NOT mutated (regression guard).
         python -c "import torch, transformers, numba, numpy; print(f'main-env intact: torch={torch.__version__} transformers={transformers.__version__} numba={numba.__version__} numpy={numpy.__version__}')" ; \

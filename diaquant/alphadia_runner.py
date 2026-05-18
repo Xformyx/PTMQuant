@@ -361,6 +361,24 @@ def _alphadia_config_and_audit(
 
     }
 
+    # ---- general.thread_count (memory control) ----------------------------
+    # AlphaDIA spawns worker threads for speclib processing, DecoyGenerator,
+    # and multi-file search steps.  Each worker holds a portion of the speclib
+    # in memory, so peak RAM ≈ thread_count × per-thread-cost.  Limiting this
+    # is the primary lever for avoiding DecoyGenerator OOM on hosts with
+    # ≤ 128 GB Docker RAM.
+    #
+    # cfg.alphadia_threads = None  → omit the key entirely; AlphaDIA 2.x
+    #   defaults to auto (all logical CPUs), which is fine on large servers.
+    # cfg.alphadia_threads = 0     → same as None (AlphaDIA interprets 0 as auto).
+    # cfg.alphadia_threads ≥ 1     → hard thread count for all AlphaDIA stages.
+    #
+    # Source of truth: DiaQuantConfig.alphadia_threads (set from YAML or env
+    # var PTMQUANT_ALPHADIA_THREADS; PTM-platform passes it via config.yaml).
+    _alphadia_threads = getattr(cfg, "alphadia_threads", None)
+    if _alphadia_threads is not None and int(_alphadia_threads) > 0:
+        config["general"] = {"thread_count": int(_alphadia_threads)}
+
     audit: dict = {
         "pass_name": getattr(pass_profile, "name", None),
         "pass_is_whole_proteome": bool(
@@ -376,6 +394,9 @@ def _alphadia_config_and_audit(
             else "cfg.peptide_fdr"
         ),
         "ptmquant_peptdeep_model_type": peptdeep_model_type,
+        "ptmquant_alphadia_thread_count": (
+            int(_alphadia_threads) if _alphadia_threads and int(_alphadia_threads) > 0 else None
+        ),
         "ptmquant_library_mode": (
             "precomputed" if library_path else "in_engine_prediction"
         ),
@@ -474,6 +495,7 @@ def run_alphadia(
         "var_mods": cfg_dict["library_prediction"]["variable_modifications"],
         "fdr": cfg_dict["fdr"]["fdr"],
         "peptdeep_model_type": cfg_dict["library_prediction"]["peptdeep_model_type"],
+        "thread_count": (cfg_dict.get("general") or {}).get("thread_count"),
     }))
 
     t0 = time.time()
@@ -486,9 +508,17 @@ def run_alphadia(
     elapsed = time.time() - t0
 
     if proc.returncode != 0:
+        rc = proc.returncode
+        hint = ""
+        # SIGKILL (OOM or manual kill): subprocess often reports -9; shell_wait uses 137 (128+9).
+        if rc in (-9, 137):
+            hint = (
+                " — likely SIGKILL/OOM or external kill; raise Docker/container memory, "
+                "reduce workload, or pass a precomputed library (--library) to skip in-engine prediction."
+            )
         raise AlphaDIAError(
-            f"alphadia exited with code {proc.returncode} after {elapsed:.1f}s "
-            f"(config: {config_path})"
+            f"alphadia exited with code {rc} after {elapsed:.1f}s "
+            f"(config: {config_path}){hint}"
         )
 
     log.info(json.dumps({

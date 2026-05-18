@@ -54,13 +54,18 @@ if [[ -n "${PLATFORM_OVERRIDE}" ]]; then
     PLATFORM="${PLATFORM_OVERRIDE}"
 fi
 
-# Auto-select linux/amd64 on Apple Silicon so the amd64 Sage binary works.
+# Dockerfile now auto-detects architecture at RUN time via `uname -m` and
+# downloads the matching Sage tarball (x86_64 or aarch64).  No explicit
+# --platform override is needed; building natively on Apple Silicon produces
+# a linux/arm64 image which runs without Rosetta and is significantly faster.
+# You can still pass --platform linux/amd64 to force an x86_64 image (e.g.
+# for deployment on Intel/AMD servers).
 if [[ -z "${PLATFORM}" ]]; then
     HOST_OS="$(uname -s)"
     HOST_ARCH="$(uname -m)"
     if [[ "${HOST_OS}" == "Darwin" && "${HOST_ARCH}" == "arm64" ]]; then
-        PLATFORM="linux/amd64"
-        echo "[build.sh] Apple Silicon detected; defaulting --platform=${PLATFORM}"
+        echo "[build.sh] Apple Silicon detected; building native linux/arm64 image (no Rosetta needed)."
+        # No PLATFORM override — let Docker use the native arm64 engine.
     fi
 fi
 

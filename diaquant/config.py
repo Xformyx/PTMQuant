@@ -320,6 +320,26 @@ class DiaQuantConfig:
     # raises instead of silently degrading.  Useful for CI.
     pred_lib_strict_oom: bool = False
 
+    # ---- AlphaDIA thread count -----------------------------------------------
+    # Controls ``general.thread_count`` in the AlphaDIA YAML.
+    # AlphaDIA spawns this many worker threads for speclib processing and the
+    # DecoyGenerator step.  Each worker holds a copy of the speclib in memory,
+    # so peak RAM ≈ thread_count × per-thread-speclib-size.
+    #
+    # None (default) → let AlphaDIA auto-detect (all logical CPUs; fine on
+    #                   servers with ≥ 128 GB RAM).
+    # 2–4            → recommended for 64–96 GB Docker setups to avoid OOM
+    #                   at the DecoyGenerator step.
+    #
+    # Memory-tier guidance (Docker VM total):
+    #   ≤  64 GB  →  alphadia_threads = 2
+    #   ≤  96 GB  →  alphadia_threads = 4   ← current Mac Studio config
+    #   ≤ 128 GB  →  alphadia_threads = 6
+    #   > 128 GB  →  alphadia_threads = None (AlphaDIA picks automatically)
+    #
+    # Override without re-emitting YAML: set PTMQUANT_ALPHADIA_THREADS env var.
+    alphadia_threads: Optional[int] = None
+
     # ---- runtime ----
     threads: int = 0                        # 0 = autodetect
     sage_binary: str = "sage"
@@ -409,5 +429,14 @@ class DiaQuantConfig:
         cfg.pred_lib_memory_budget_gb = _env_float(
             "PTMQUANT_PEPTDEEP_MEM_BUDGET_GB", cfg.pred_lib_memory_budget_gb
         )
+        # AlphaDIA worker thread count (general.thread_count).
+        # YAML wins over env var (already applied via setattr loop above).
+        if cfg.alphadia_threads is None and "PTMQUANT_ALPHADIA_THREADS" in os.environ:
+            raw_thr = os.environ["PTMQUANT_ALPHADIA_THREADS"].strip()
+            if raw_thr:
+                try:
+                    cfg.alphadia_threads = max(0, int(raw_thr))
+                except ValueError:
+                    pass
         cfg.output_dir.mkdir(parents=True, exist_ok=True)
         return cfg
